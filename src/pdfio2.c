@@ -39,26 +39,26 @@
  *     Convert tiff multipage to pdf file
  *          l_int32              convertTiffMultipageToPdf()
  *
- *     Low-level CID-based operations
- *
- *       Without transcoding
+ *     Generates the CID, transcoding under some conditions
  *          l_int32              l_generateCIDataForPdf()
+ *          l_int32              l_generateCIData()
+ *
+ *       Lower-level CID generation without transcoding
  *          L_COMP_DATA         *l_generateFlateDataPdf()
  *          L_COMP_DATA         *l_generateJpegData()
  *          L_COMP_DATA         *l_generateJpegDataMem()
  *          static L_COMP_DATA  *l_generateJp2kData()
+ *          L_COMP_DATA         *l_generateG4Data()
  *
- *       With transcoding
- *          l_int32              l_generateCIData()
+ *       Lower-level CID generation with transcoding
  *          l_int32              pixGenerateCIData()
  *          L_COMP_DATA         *l_generateFlateData()
  *          static L_COMP_DATA  *pixGenerateFlateData()
  *          static L_COMP_DATA  *pixGenerateJpegData()
  *          static L_COMP_DATA  *pixGenerateJp2kData()
  *          static L_COMP_DATA  *pixGenerateG4Data()
- *          L_COMP_DATA         *l_generateG4Data()
  *
- *       Other
+ *       Other CID operations
  *          l_int32              cidConvertToPdfData()
  *          void                 l_CIDataDestroy()
  *
@@ -506,7 +506,7 @@ FILE    *fp;
 
 
 /*---------------------------------------------------------------------*
- *                     Low-level CID-based operations                  *
+ *                          CID-based operations                       *
  *---------------------------------------------------------------------*/
 /*!
  * \brief   l_generateCIDataForPdf()
@@ -529,6 +529,10 @@ FILE    *fp;
  *      (4) We don't try to open files named "stdin" or "-" for Tesseract
  *          compatibility reasons. We may remove this restriction
  *          in the future.
+ *      (5) Note that tiff-g4 must be transcoded to properly handle byte
+ *          order and perhaps photometry (e.g., min-is-black).  For a
+ *          multipage tiff file, data will only be extracted from the
+ *          first page, so this should not be invoked.
  * </pre>
  */
 l_ok
@@ -595,6 +599,116 @@ PIX          *pixt;
 
 
 /*!
+ * \brief   l_generateCIData()
+ *
+ * \param[in]    fname
+ * \param[in]    type       L_G4_ENCODE, L_JPEG_ENCODE, L_FLATE_ENCODE,
+ *                          L_JP2K_ENCODE
+ * \param[in]    quality    for jpeg if transcoded: 1-100; 0 for default (75)
+ *                          for jp2k if transcoded: 27-45; 0 for default (34)
+ * \param[in]    ascii85    0 for binary; 1 for ascii85-encoded
+ * \param[out]   pcid       compressed data
+ * \return  0 if OK, 1 on error
+ *
+ * <pre>
+ * Notes:
+ *      (1) This can be used for both PostScript and pdf.
+ *      (1) Set ascii85:
+ *           ~ 0 for binary data (PDF only)
+ *           ~ 1 for ascii85 (5 for 4) encoded binary data (PostScript only)
+ *      (2) This attempts to compress according to the requested type.
+ *          If this can't be done, it falls back to ordinary flate encoding.
+ *      (3) This differs from l_generateCIDataForPdf(), which determines
+ *          the file format and only works for pdf.
+ * </pre>
+ */
+l_ok
+l_generateCIData(const char    *fname,
+                 l_int32        type,
+                 l_int32        quality,
+                 l_int32        ascii85,
+                 L_COMP_DATA  **pcid)
+{
+l_int32       format, d, bps, spp, iscmap;
+L_COMP_DATA  *cid;
+PIX          *pix;
+
+    PROCNAME("l_generateCIData");
+
+    if (!pcid)
+        return ERROR_INT("&cid not defined", procName, 1);
+    *pcid = NULL;
+    if (!fname)
+        return ERROR_INT("fname not defined", procName, 1);
+    if (type != L_G4_ENCODE && type != L_JPEG_ENCODE &&
+        type != L_FLATE_ENCODE && type != L_JP2K_ENCODE)
+        return ERROR_INT("invalid conversion type", procName, 1);
+    if (ascii85 != 0 && ascii85 != 1)
+        return ERROR_INT("invalid ascii85", procName, 1);
+
+        /* Sanity check on requested encoding */
+    pixReadHeader(fname, &format, NULL, NULL, &bps, &spp, &iscmap);
+    d = bps * spp;
+    if (d == 24) d = 32;
+    if (iscmap && type != L_FLATE_ENCODE) {
+        L_WARNING("pixs has cmap; using flate encoding\n", procName);
+        type = L_FLATE_ENCODE;
+    } else if (d < 8 && type == L_JPEG_ENCODE) {
+        L_WARNING("pixs has < 8 bpp; using flate encoding\n", procName);
+        type = L_FLATE_ENCODE;
+    } else if (d < 8 && type == L_JP2K_ENCODE) {
+        L_WARNING("pixs has < 8 bpp; using flate encoding\n", procName);
+        type = L_FLATE_ENCODE;
+    } else if (d > 1 && type == L_G4_ENCODE) {
+        L_WARNING("pixs has > 1 bpp; using flate encoding\n", procName);
+        type = L_FLATE_ENCODE;
+    }
+
+    if (type == L_JPEG_ENCODE) {
+        if (format == IFF_JFIF_JPEG) {  /* do not transcode */
+            cid = l_generateJpegData(fname, ascii85);
+        } else {
+            if ((pix = pixRead(fname)) == NULL)
+                return ERROR_INT("pix not returned for JPEG", procName, 1);
+            cid = pixGenerateJpegData(pix, ascii85, quality);
+            pixDestroy(&pix);
+        }
+        if (!cid)
+            return ERROR_INT("jpeg data not made", procName, 1);
+    } else if (type == L_JP2K_ENCODE) {
+        if (format == IFF_JP2) {  /* do not transcode */
+            cid = l_generateJp2kData(fname);
+        } else {
+            if ((pix = pixRead(fname)) == NULL)
+                return ERROR_INT("pix not returned for JP2K", procName, 1);
+            cid = pixGenerateJp2kData(pix, quality);
+            pixDestroy(&pix);
+        }
+        if (!cid)
+            return ERROR_INT("jp2k data not made", procName, 1);
+    } else if (type == L_G4_ENCODE) {
+        if ((pix = pixRead(fname)) == NULL)
+            return ERROR_INT("pix not returned for G4", procName, 1);
+        cid = pixGenerateG4Data(pix, ascii85);
+        pixDestroy(&pix);
+        if (!cid)
+            return ERROR_INT("g4 data not made", procName, 1);
+    } else if (type == L_FLATE_ENCODE) {
+        if ((cid = l_generateFlateData(fname, ascii85)) == NULL)
+            return ERROR_INT("flate data not made", procName, 1);
+    } else {
+        return ERROR_INT("invalid conversion type", procName, 1);
+    }
+    *pcid = cid;
+
+    return 0;
+}
+
+
+/*---------------------------------------------------------------------*
+ *                     Low-level CID-based operations                  *
+ *---------------------------------------------------------------------*/
+/*!
  * \brief   l_generateFlateDataPdf()
  *
  * \param[in]    fname     preferably png
@@ -609,7 +723,7 @@ PIX          *pixt;
  *      (2) Exception: if the png is interlaced or if it is RGBA,
  *          it will be transcoded.
  *      (3) If transcoding is required, this will not have to read from
- *          file if you also input a pix.
+ *          file if a pix is input.
  * </pre>
  */
 L_COMP_DATA *
@@ -652,12 +766,13 @@ PIXCMAP      *cmap = NULL;
            of them. We need to transcode anything with interlacing, an
            alpha channel, or 1 bpp (which would otherwise be photo-inverted).
 
-           Be careful with spp. Any PNG image file with an alpha
-           channel is converted on reading to RGBA (spp == 4). This
-           includes the (gray + alpha) format with spp == 2. You
-           will get different results if you look at spp via
-           readHeaderPng() versus pixGetSpp() */
-    if (format != IFF_PNG || interlaced || bps == 1 || spp == 4 || spp == 2) {
+           Note: any PNG image file with an alpha channel is converted on
+           reading to RGBA (spp == 4). This includes the (gray + alpha) format
+           with spp == 2.  Because of the conversion, readHeaderPng() gives
+           spp = 2, whereas pixGetSpp() gives spp = 4 on the converted pix. */
+    if (format != IFF_PNG ||
+       (format == IFF_PNG && (interlaced || bps == 1 || spp == 4 || spp == 2)))
+    {  /* lgtm+ analyzer needed the logic expanded */
         if (!pixs)
             pix = pixRead(fname);
         else
@@ -804,46 +919,83 @@ PIXCMAP      *cmap = NULL;
  * <pre>
  * Notes:
  *      (1) Set ascii85flag:
- *           ~ 0 for binary data (not permitted in PostScript)
- *           ~ 1 for ascii85 (5 for 4) encoded binary data
- *               (not permitted in pdf)
- *      (2) Do not free the data.  l_generateJpegDataMem() will free
- *          the data if the data is invalid, or if it does not use
- *          ascii encoding.
+ *           ~ 0 for binary data (PDF only)
+ *           ~ 1 for ascii85 (5 for 4) encoded binary data (PostScript only)
+ *      (2) Most of this function is repeated in l_generateJpegMemData(),
+ *          which is required in pixacompFastConvertToPdfData().
  * </pre>
  */
 L_COMP_DATA *
 l_generateJpegData(const char  *fname,
                    l_int32      ascii85flag)
 {
+char         *data85 = NULL;  /* ascii85 encoded jpeg compressed file */
 l_uint8      *data = NULL;
-size_t        nbytes;
+l_int32       w, h, xres, yres, bps, spp;
+size_t        nbytes, nbytes85;
+L_COMP_DATA  *cid;
+FILE         *fp;
 
     PROCNAME("l_generateJpegData");
 
     if (!fname)
         return (L_COMP_DATA *)ERROR_PTR("fname not defined", procName, NULL);
 
-        /* The returned jpeg data in memory is the entire jpeg file,
-         * which starts with ffd8 and ends with ffd9 */
+        /* Read the metadata */
+    if (readHeaderJpeg(fname, &w, &h, &spp, NULL, NULL))
+        return (L_COMP_DATA *)ERROR_PTR("bad jpeg metadata", procName, NULL);
+    bps = 8;
+    if ((fp = fopenReadStream(fname)) == NULL)
+        return (L_COMP_DATA *)ERROR_PTR("stream not opened", procName, NULL);
+    fgetJpegResolution(fp, &xres, &yres);
+    fclose(fp);
+
+        /* Read the entire jpeg file.  The returned jpeg data in memory
+         * starts with ffd8 and ends with ffd9 */
     if ((data = l_binaryRead(fname, &nbytes)) == NULL)
         return (L_COMP_DATA *)ERROR_PTR("data not extracted", procName, NULL);
 
-    return l_generateJpegDataMem(data, nbytes, ascii85flag);
+        /* Optionally, encode the compressed data */
+    if (ascii85flag == 1) {
+        data85 = encodeAscii85(data, nbytes, &nbytes85);
+        LEPT_FREE(data);
+        if (!data85)
+            return (L_COMP_DATA *)ERROR_PTR("data85 not made", procName, NULL);
+        else
+            data85[nbytes85 - 1] = '\0';  /* remove the newline */
+    }
+
+    cid = (L_COMP_DATA *)LEPT_CALLOC(1, sizeof(L_COMP_DATA));
+    if (ascii85flag == 0) {
+        cid->datacomp = data;
+    } else {  /* ascii85 */
+        cid->data85 = data85;
+        cid->nbytes85 = nbytes85;
+    }
+    cid->type = L_JPEG_ENCODE;
+    cid->nbytescomp = nbytes;
+    cid->w = w;
+    cid->h = h;
+    cid->bps = bps;
+    cid->spp = spp;
+    cid->res = xres;
+    return cid;
 }
 
 
 /*!
  * \brief   l_generateJpegDataMem()
  *
- * \param[in]    data           of jpeg file
- * \param[in]    nbytes         of jpeg file
+ * \param[in]    data           of jpeg-encoded file
+ * \param[in]    nbytes         size of jpeg-encoded file
  * \param[in]    ascii85flag    0 for jpeg; 1 for ascii85-encoded jpeg
  * \return  cid containing jpeg data, or NULL on error
  *
  * <pre>
  * Notes:
- *      (1) See l_generateJpegData().
+ *      (1) Set ascii85flag:
+ *           ~ 0 for binary data (PDF only)
+ *           ~ 1 for ascii85 (5 for 4) encoded binary data (PostScript only)
  * </pre>
  */
 L_COMP_DATA *
@@ -853,7 +1005,7 @@ l_generateJpegDataMem(l_uint8  *data,
 {
 char         *data85 = NULL;  /* ascii85 encoded jpeg compressed file */
 l_int32       w, h, xres, yres, bps, spp;
-l_int32       nbytes85;
+size_t        nbytes85;
 L_COMP_DATA  *cid;
 
     PROCNAME("l_generateJpegDataMem");
@@ -921,13 +1073,11 @@ FILE         *fp;
     if (!fname)
         return (L_COMP_DATA *)ERROR_PTR("fname not defined", procName, NULL);
 
-    if (readHeaderJp2k(fname, &w, &h, &bps, &spp))
+    if (readHeaderJp2k(fname, &w, &h, &bps, &spp, NULL))
         return (L_COMP_DATA *)ERROR_PTR("bad jp2k metadata", procName, NULL);
 
-    if ((cid = (L_COMP_DATA *)LEPT_CALLOC(1, sizeof(L_COMP_DATA))) == NULL)
-        return (L_COMP_DATA *)ERROR_PTR("cid not made", procName, NULL);
-
         /* The returned jp2k data in memory is the entire jp2k file */
+    cid = (L_COMP_DATA *)LEPT_CALLOC(1, sizeof(L_COMP_DATA));
     if ((cid->datacomp = l_binaryRead(fname, &nbytes)) == NULL) {
         l_CIDataDestroy(&cid);
         return (L_COMP_DATA *)ERROR_PTR("data not extracted", procName, NULL);
@@ -950,105 +1100,87 @@ FILE         *fp;
 
 
 /*!
- * \brief   l_generateCIData()
+ * \brief   l_generateG4Data()
  *
- * \param[in]    fname
- * \param[in]    type       L_G4_ENCODE, L_JPEG_ENCODE, L_FLATE_ENCODE,
- *                          L_JP2K_ENCODE
- * \param[in]    quality    for jpeg if transcoded: 1-100; 0 for default (75)
- *                          for jp2k if transcoded: 27-45; 0 for default (34)
- * \param[in]    ascii85    0 for binary; 1 for ascii85-encoded
- * \param[out]   pcid       compressed data
- * \return  0 if OK, 1 on error
+ * \param[in]    fname          of g4 compressed file
+ * \param[in]    ascii85flag    0 for g4 compressed; 1 for ascii85-encoded g4
+ * \return  cid g4 compressed image data, or NULL on error
  *
  * <pre>
  * Notes:
- *      (1) This can be used for both PostScript and pdf.
- *      (1) Set ascii85:
- *           ~ 0 for binary data (not permitted in PostScript)
- *           ~ 1 for ascii85 (5 for 4) encoded binary data
- *      (2) This attempts to compress according to the requested type.
- *          If this can't be done, it falls back to ordinary flate encoding.
- *      (3) This differs from l_generateCIDataPdf(), which determines
- *          the format and attempts to generate the CID without transcoding.
+ *      (1) Set ascii85flag:
+ *           ~ 0 for binary data (PDF only)
+ *           ~ 1 for ascii85 (5 for 4) encoded binary data (PostScript only)
+ *      (2) This does not work for multipage tiff files.
  * </pre>
  */
-l_ok
-l_generateCIData(const char    *fname,
-                 l_int32        type,
-                 l_int32        quality,
-                 l_int32        ascii85,
-                 L_COMP_DATA  **pcid)
+L_COMP_DATA *
+l_generateG4Data(const char  *fname,
+                 l_int32      ascii85flag)
 {
-l_int32       format, d, bps, spp, iscmap;
+l_uint8      *datacomp = NULL;  /* g4 compressed raster data */
+char         *data85 = NULL;  /* ascii85 encoded g4 compressed data */
+l_int32       w, h, xres, yres, npages;
+l_int32       minisblack;  /* TRUE or FALSE */
+size_t        nbytes85, nbytescomp;
 L_COMP_DATA  *cid;
-PIX          *pix;
+FILE         *fp;
 
-    PROCNAME("l_generateCIData");
+    PROCNAME("l_generateG4Data");
 
-    if (!pcid)
-        return ERROR_INT("&cid not defined", procName, 1);
-    *pcid = NULL;
     if (!fname)
-        return ERROR_INT("fname not defined", procName, 1);
-    if (type != L_G4_ENCODE && type != L_JPEG_ENCODE &&
-        type != L_FLATE_ENCODE && type != L_JP2K_ENCODE)
-        return ERROR_INT("invalid conversion type", procName, 1);
-    if (ascii85 != 0 && ascii85 != 1)
-        return ERROR_INT("invalid ascii85", procName, 1);
+        return (L_COMP_DATA *)ERROR_PTR("fname not defined", procName, NULL);
 
-        /* Sanity check on requested encoding */
-    pixReadHeader(fname, &format, NULL, NULL, &bps, &spp, &iscmap);
-    d = bps * spp;
-    if (d == 24) d = 32;
-    if (iscmap && type != L_FLATE_ENCODE) {
-        L_WARNING("pixs has cmap; using flate encoding\n", procName);
-        type = L_FLATE_ENCODE;
-    } else if (d < 8 && type == L_JPEG_ENCODE) {
-        L_WARNING("pixs has < 8 bpp; using flate encoding\n", procName);
-        type = L_FLATE_ENCODE;
-    } else if (d < 8 && type == L_JP2K_ENCODE) {
-        L_WARNING("pixs has < 8 bpp; using flate encoding\n", procName);
-        type = L_FLATE_ENCODE;
-    } else if (d > 1 && type == L_G4_ENCODE) {
-        L_WARNING("pixs has > 1 bpp; using flate encoding\n", procName);
-        type = L_FLATE_ENCODE;
+        /* Make sure this is a single page tiff file */
+    if ((fp = fopenReadStream(fname)) == NULL)
+        return (L_COMP_DATA *)ERROR_PTR("stream not opened", procName, NULL);
+    tiffGetCount(fp, &npages);
+    fclose(fp);
+    if (npages != 1) {
+        L_ERROR(" %d page tiff; only works with 1 page\n", procName, npages);
+        return NULL;
     }
 
-    if (type == L_JPEG_ENCODE) {
-        if (format == IFF_JFIF_JPEG) {  /* do not transcode */
-            cid = l_generateJpegData(fname, ascii85);
-        } else {
-            if ((pix = pixRead(fname)) == NULL)
-                return ERROR_INT("pix not returned", procName, 1);
-            cid = pixGenerateJpegData(pix, ascii85, quality);
-            pixDestroy(&pix);
-        }
-        if (!cid)
-            return ERROR_INT("jpeg data not made", procName, 1);
-    } else if (type == L_JP2K_ENCODE) {
-        if (format == IFF_JP2) {  /* do not transcode */
-            cid = l_generateJp2kData(fname);
-        } else {
-            if ((pix = pixRead(fname)) == NULL)
-                return ERROR_INT("pix not returned", procName, 1);
-            cid = pixGenerateJp2kData(pix, quality);
-            pixDestroy(&pix);
-        }
-        if (!cid)
-            return ERROR_INT("jp2k data not made", procName, 1);
-    } else if (type == L_G4_ENCODE) {
-        if ((cid = l_generateG4Data(fname, ascii85)) == NULL)
-            return ERROR_INT("g4 data not made", procName, 1);
-    } else if (type == L_FLATE_ENCODE) {
-        if ((cid = l_generateFlateData(fname, ascii85)) == NULL)
-            return ERROR_INT("flate data not made", procName, 1);
-    } else {
-        return ERROR_INT("invalid conversion type", procName, 1);
-    }
-    *pcid = cid;
+        /* Read the resolution */
+    fp = fopenReadStream(fname);
+    getTiffResolution(fp, &xres, &yres);
+    fclose(fp);
 
-    return 0;
+        /* The returned ccitt g4 data in memory is the block of
+         * bytes in the tiff file, starting after 8 bytes and
+         * ending before the directory. */
+    if (extractG4DataFromFile(fname, &datacomp, &nbytescomp,
+                              &w, &h, &minisblack)) {
+        return (L_COMP_DATA *)ERROR_PTR("datacomp not extracted",
+                                        procName, NULL);
+    }
+
+        /* Optionally, encode the compressed data */
+    if (ascii85flag == 1) {
+        data85 = encodeAscii85(datacomp, nbytescomp, &nbytes85);
+        LEPT_FREE(datacomp);
+        if (!data85)
+            return (L_COMP_DATA *)ERROR_PTR("data85 not made", procName, NULL);
+        else
+            data85[nbytes85 - 1] = '\0';  /* remove the newline */
+    }
+
+    cid = (L_COMP_DATA *)LEPT_CALLOC(1, sizeof(L_COMP_DATA));
+    if (ascii85flag == 0) {
+        cid->datacomp = datacomp;
+    } else {  /* ascii85 */
+        cid->data85 = data85;
+        cid->nbytes85 = nbytes85;
+    }
+    cid->type = L_G4_ENCODE;
+    cid->nbytescomp = nbytescomp;
+    cid->w = w;
+    cid->h = h;
+    cid->bps = 1;
+    cid->spp = 1;
+    cid->minisblack = minisblack;
+    cid->res = xres;
+    return cid;
 }
 
 
@@ -1067,8 +1199,8 @@ PIX          *pix;
  * <pre>
  * Notes:
  *      (1) Set ascii85:
- *           ~ 0 for binary data (not permitted in PostScript)
- *           ~ 1 for ascii85 (5 for 4) encoded binary data
+ *           ~ 0 for binary data (PDF only)
+ *           ~ 1 for ascii85 (5 for 4) encoded binary data (PostScript only)
  * </pre>
  */
 l_ok
@@ -1164,8 +1296,9 @@ PIXCMAP  *cmap;
  *           ~ 8 bpp, colormap
  *           ~ 32 bpp rgb
  *      (2) Set ascii85flag:
- *           ~ 0 for binary data (not permitted in PostScript)
- *           ~ 1 for ascii85 (5 for 4) encoded binary data
+ *           ~ 0 for binary data (PDF only)
+ *           ~ 1 for ascii85 (5 for 4) encoded binary data (PostScript only)
+ *      (3) Always transcodes (i.e., first decodes the png file)
  * </pre>
  */
 L_COMP_DATA *
@@ -1219,8 +1352,8 @@ l_int32       ncolors;  /* in colormap; not used if cmapdata85 is null */
 l_int32       bps;  /* bits/sample: usually 8 */
 l_int32       spp;  /* samples/pixel: 1-grayscale/cmap); 3-rgb */
 l_int32       w, h, d, cmapflag;
-l_int32       ncmapbytes85 = 0;
-l_int32       nbytes85 = 0;
+size_t        ncmapbytes85 = 0;
+size_t        nbytes85 = 0;
 size_t        nbytes, nbytescomp;
 L_COMP_DATA  *cid;
 PIX          *pixt;
@@ -1323,8 +1456,8 @@ PIXCMAP      *cmap;
  * <pre>
  * Notes:
  *      (1) Set ascii85flag:
- *           ~ 0 for binary data (not permitted in PostScript)
- *           ~ 1 for ascii85 (5 for 4) encoded binary data
+ *           ~ 0 for binary data (PDF only)
+ *           ~ 1 for ascii85 (5 for 4) encoded binary data (PostScript only)
  * </pre>
  */
 static L_COMP_DATA *
@@ -1413,15 +1546,15 @@ L_COMP_DATA  *cid;
 /*!
  * \brief   pixGenerateG4Data()
  *
- * \param[in]    pixs           1 bpp
+ * \param[in]    pixs           1 bpp, no colormap
  * \param[in]    ascii85flag    0 for gzipped; 1 for ascii85-encoded gzipped
  * \return  cid g4 compressed image data, or NULL on error
  *
  * <pre>
  * Notes:
  *      (1) Set ascii85flag:
- *           ~ 0 for binary data (not permitted in PostScript)
- *           ~ 1 for ascii85 (5 for 4) encoded binary data
+ *           ~ 0 for binary data (PDF only)
+ *           ~ 1 for ascii85 (5 for 4) encoded binary data (PostScript only)
  * </pre>
  */
 static L_COMP_DATA *
@@ -1437,6 +1570,8 @@ L_COMP_DATA  *cid;
         return (L_COMP_DATA *)ERROR_PTR("pixs not defined", procName, NULL);
     if (pixGetDepth(pixs) != 1)
         return (L_COMP_DATA *)ERROR_PTR("pixs not 1 bpp", procName, NULL);
+    if (pixGetColormap(pixs))
+        return (L_COMP_DATA *)ERROR_PTR("pixs has colormap", procName, NULL);
 
         /* Compress to a temp tiff g4 file */
     fname = l_makeTempFilename();
@@ -1449,83 +1584,6 @@ L_COMP_DATA  *cid;
     if (lept_rmfile(fname) != 0)
         L_ERROR("temp file %s was not deleted\n", procName, fname);
     LEPT_FREE(fname);
-    return cid;
-}
-
-
-/*!
- * \brief   l_generateG4Data()
- *
- * \param[in]    fname          of g4 compressed file
- * \param[in]    ascii85flag    0 for g4 compressed; 1 for ascii85-encoded g4
- * \return  cid g4 compressed image data, or NULL on error
- *
- * <pre>
- * Notes:
- *      (1) Set ascii85flag:
- *           ~ 0 for binary data (not permitted in PostScript)
- *           ~ 1 for ascii85 (5 for 4) encoded binary data
- *             (not permitted in pdf)
- * </pre>
- */
-L_COMP_DATA *
-l_generateG4Data(const char  *fname,
-                 l_int32      ascii85flag)
-{
-l_uint8      *datacomp = NULL;  /* g4 compressed raster data */
-char         *data85 = NULL;  /* ascii85 encoded g4 compressed data */
-l_int32       w, h, xres, yres;
-l_int32       minisblack;  /* TRUE or FALSE */
-l_int32       nbytes85;
-size_t        nbytescomp;
-L_COMP_DATA  *cid;
-FILE         *fp;
-
-    PROCNAME("l_generateG4Data");
-
-    if (!fname)
-        return (L_COMP_DATA *)ERROR_PTR("fname not defined", procName, NULL);
-
-        /* Read the resolution */
-    if ((fp = fopenReadStream(fname)) == NULL)
-        return (L_COMP_DATA *)ERROR_PTR("stream not opened", procName, NULL);
-    getTiffResolution(fp, &xres, &yres);
-    fclose(fp);
-
-        /* The returned ccitt g4 data in memory is the block of
-         * bytes in the tiff file, starting after 8 bytes and
-         * ending before the directory. */
-    if (extractG4DataFromFile(fname, &datacomp, &nbytescomp,
-                              &w, &h, &minisblack)) {
-        return (L_COMP_DATA *)ERROR_PTR("datacomp not extracted",
-                                        procName, NULL);
-    }
-
-        /* Optionally, encode the compressed data */
-    if (ascii85flag == 1) {
-        data85 = encodeAscii85(datacomp, nbytescomp, &nbytes85);
-        LEPT_FREE(datacomp);
-        if (!data85)
-            return (L_COMP_DATA *)ERROR_PTR("data85 not made", procName, NULL);
-        else
-            data85[nbytes85 - 1] = '\0';  /* remove the newline */
-    }
-
-    cid = (L_COMP_DATA *)LEPT_CALLOC(1, sizeof(L_COMP_DATA));
-    if (ascii85flag == 0) {
-        cid->datacomp = datacomp;
-    } else {  /* ascii85 */
-        cid->data85 = data85;
-        cid->nbytes85 = nbytes85;
-    }
-    cid->type = L_G4_ENCODE;
-    cid->nbytescomp = nbytescomp;
-    cid->w = w;
-    cid->h = h;
-    cid->bps = 1;
-    cid->spp = 1;
-    cid->minisblack = minisblack;
-    cid->res = xres;
     return cid;
 }
 
@@ -1614,7 +1672,6 @@ L_COMP_DATA  *cid;
     if (cid->cmapdatahex) LEPT_FREE(cid->cmapdatahex);
     LEPT_FREE(cid);
     *pcid = NULL;
-    return;
 }
 
 
@@ -1734,7 +1791,6 @@ SARRAY  *sa;
     lpd->poststream = stringNew("\n"
                                 "endstream\n"
                                 "endobj\n");
-    return;
 }
 
 
@@ -1812,8 +1868,6 @@ l_float32  xpt, ypt, wpt, hpt, maxx, maxy;
         ptaGetPt(lpd->wh, i, &wpt, &hpt);
         ptaSetPt(lpd->xy, i, xpt, maxy - ypt - hpt);
     }
-
-    return;
 }
 
 
@@ -1924,7 +1978,7 @@ generatePreXStringsPdf(L_PDF_DATA  *lpd)
 {
 char          buff[256];
 char          buf[L_BIGBUF];
-char         *cstr, *bstr, *fstr, *pstr, *xstr;
+char         *cstr, *bstr, *fstr, *pstr, *xstr, *photometry;
 l_int32       i, cmindex;
 L_COMP_DATA  *cid;
 SARRAY       *sa;
@@ -1947,14 +2001,19 @@ SARRAY       *sa;
             }
             bstr = stringNew("/BitsPerComponent 1\n"
                              "/Interpolate true");
+                /* Note: the reversal is deliberate */
+            photometry = (cid->minisblack) ? stringNew("true")
+                                           : stringNew("false");
             snprintf(buff, sizeof(buff),
                      "/Filter /CCITTFaxDecode\n"
                      "/DecodeParms\n"
                      "<<\n"
+                     "/BlackIs1 %s\n"
                      "/K -1\n"
                      "/Columns %d\n"
-                     ">>", cid->w);
+                     ">>", photometry, cid->w);
             fstr = stringNew(buff);
+            LEPT_FREE(photometry);
         } else if (cid->type == L_JPEG_ENCODE) {
             if (cid->spp == 1)
                 cstr = stringNew("/ColorSpace /DeviceGray");
@@ -2307,10 +2366,10 @@ SARRAY   *sa;
 #if  DEBUG_MULTIPAGE
     lept_stderr("************** Trailer string ************\n");
     lept_stderr("xrefloc = %d", xrefloc);
-    sarrayWriteStream(stderr, sa);
+    sarrayWriteStderr(sa);
 
     lept_stderr("************** Object locations ************");
-    l_dnaWriteStream(stderr, da);
+    l_dnaWriteStderr(da);
 #endif  /* DEBUG_MULTIPAGE */
     sarrayDestroy(&sa);
 
@@ -2411,18 +2470,30 @@ substituteObjectNumbers(L_BYTEA  *bas,
 l_uint8   space = ' ';
 l_uint8  *datas;
 l_uint8   buf[32];  /* only needs to hold one integer in ascii format */
-l_int32   start, nrepl, i, j, objin, objout, found;
+l_int32   start, nrepl, i, j, nobjs, objin, objout, found;
 l_int32  *objs, *matches;
 size_t    size;
 L_BYTEA  *bad;
 L_DNA    *da_match;
 
+    PROCNAME("substituteObjectNumbers");
+    if (!bas)
+        return (L_BYTEA *)ERROR_PTR("bas not defined", procName, NULL);
+    if (!na_objs)
+        return (L_BYTEA *)ERROR_PTR("na_objs not defined", procName, NULL);
+
     datas = l_byteaGetData(bas, &size);
     bad = l_byteaCreate(100);
     objs = numaGetIArray(na_objs);  /* object number mapper */
+    nobjs = numaGetCount(na_objs);  /* use for sanity checking */
 
         /* Substitute the object number on the first line */
     sscanf((char *)datas, "%d", &objin);
+    if (objin < 0 || objin >= nobjs) {
+        L_ERROR("index %d into array of size %d\n", procName, objin, nobjs);
+        LEPT_FREE(objs);
+        return bad;
+    }
     objout = objs[objin];
     snprintf((char *)buf, 32, "%d", objout);
     l_byteaAppendString(bad, (char *)buf);
@@ -2448,6 +2519,13 @@ L_DNA    *da_match;
             /* Copy bytes from 'start' up to the object number */
         l_byteaAppendData(bad, datas + start, j - start + 1);
         sscanf((char *)(datas + j + 1), "%d", &objin);
+        if (objin < 0 || objin >= nobjs) {
+            L_ERROR("index %d into array of size %d\n", procName, objin, nobjs);
+            LEPT_FREE(objs);
+            LEPT_FREE(matches);
+            l_dnaDestroy(&da_match);
+            return bad;
+        }
         objout = objs[objin];
         snprintf((char *)buf, 32, "%d", objout);
         l_byteaAppendString(bad, (char *)buf);
@@ -2522,7 +2600,6 @@ L_PDF_DATA   *lpd;
     if (lpd->objloc) l_dnaDestroy(&lpd->objloc);
     LEPT_FREE(lpd);
     *plpd = NULL;
-    return;
 }
 
 

@@ -66,7 +66,7 @@ SARRAY   *sa1;
         /* Read the data from all samples */
     pix1 = pixRead("recog/sets/samples06.png");
     boxatxt = pixGetText(pix1);
-    fprintf(stderr, "%s\n", boxatxt);
+    lept_stderr("%s\n", boxatxt);
     boxa1 = boxaReadMem((l_uint8 *)boxatxt, strlen(boxatxt));
     pixa1 = pixaCreateFromBoxa(pix1, boxa1, 0, 0, NULL);
     pixDestroy(&pix1);  /* destroys boxa1 */
@@ -91,13 +91,13 @@ SARRAY   *sa1;
             /* Get the numbers in the sample */
         recogIdentifyMultiple(recog, pix1, 0, 0, &boxa3, NULL, &pixdb, 0);
         sa1 = recogExtractNumbers(recog, boxa3, 0.7, -1, &baa1, &naa1);
-        sarrayWriteStream(stderr, sa1);
+        sarrayWriteStderr(sa1);
         boxaaWriteStream(stderr, baa1);
         numaaWriteStream(stderr, naa1);
         pixaAddPix(pixa2, pixdb, L_INSERT);
 /*        pixaWrite("/tmp/pixa.pa", pixa2); */
         pixDestroy(&pix1);
-        boxaWriteStream(stderr, boxa3);
+        boxaWriteStderr(boxa3);
         boxaDestroy(&boxa3);
         boxaaDestroy(&baa1);
         numaaDestroy(&naa1);

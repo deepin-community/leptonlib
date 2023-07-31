@@ -266,6 +266,8 @@ PIX       *pixt;
         /* Prepare pixd as a copy of pixs if not identical */
     if ((pixd = pixCopy(pixd, pixs)) == NULL)
         return (PIX *)ERROR_PTR("pixd not made", procName, NULL);
+    pixSetPadBits(pixd, 0);  /* be safe: */
+    pixSetPadBits(pixm, 0);  /* avoid using uninitialized memory */
 
         /* pixt is used to test for completion */
     if ((pixt = pixCreateTemplate(pixs)) == NULL)
@@ -278,7 +280,6 @@ PIX       *pixt;
     wpld = pixGetWpl(pixd);
     wplm = pixGetWpl(pixm);
 
-    pixSetPadBits(pixm, 0);
 
     for (i = 0; i < MaxIters; i++) {
         pixCopy(pixt, pixd);
@@ -578,7 +579,6 @@ l_uint32  *lines, *linem;
 
     default:
         L_ERROR("connectivity must be 4 or 8\n", procName);
-        return;
     }
 }
 
@@ -824,21 +824,23 @@ PIX  *pixd;
  * <pre>
  * Notes:
  *      (1) This does not fill holes that are smaller in area than 'minsize'.
+ *          Use %minsize = 0 and %maxhfract = 1.0 to fill all holes.
  *      (2) This does not fill holes with an area larger than
- *          'maxhfract' times the fg area of the c.c.
+ *          %maxhfract times the fg area of the c.c.
+ *          Use 1.0 to fill all holes.
  *      (3) This does not expand the fg of the c.c. to bounding rect if
- *          the fg area is less than 'minfgfract' times the area of the
- *          bounding rect.
+ *          the fg area is less than %minfgfract times the area of the
+ *          bounding rect.  Use 1.0 to skip expanding to the bounding rect.
  *      (4) The decisions are made as follows:
  *           ~ Decide if we are filling the holes; if so, when using
  *             the fg area, include the filled holes.
  *           ~ Decide based on the fg area if we are filling to a bounding rect.
  *             If so, do it.
  *             If not, fill the holes if the condition is satisfied.
- *      (5) The choice of minsize depends on the resolution.
+ *      (5) The choice of %minsize depends on the resolution.
  *      (6) For solidifying image mask regions on printed materials,
- *          which tend to be rectangular, values for maxhfract
- *          and minfgfract around 0.5 are reasonable.
+ *          which tend to be rectangular, values for %maxhfract
+ *          and %minfgfract around 0.5 are reasonable.
  * </pre>
  */
 PIX *
@@ -859,6 +861,8 @@ PIXA      *pixa;
 
     if (!pixs || pixGetDepth(pixs) != 1)
         return (PIX *)ERROR_PTR("pixs undefined or not 1 bpp", procName, NULL);
+    maxhfract = L_MIN(L_MAX(maxhfract, 0.0), 1.0);
+    minfgfract = L_MIN(L_MAX(minfgfract, 0.0), 1.0);
 
     pixd = pixCopy(NULL, pixs);
     boxa = pixConnComp(pixd, &pixa, 8);
@@ -890,7 +894,6 @@ PIXA      *pixa;
     boxaDestroy(&boxa);
     pixaDestroy(&pixa);
     LEPT_FREE(tab);
-
     return pixd;
 }
 
@@ -1239,7 +1242,6 @@ L_QUEUE  *lq_pixel;
 
             queue_size = lqueueGetCount(lq_pixel);
         }
-
         break;
 
     case 8:
@@ -1471,7 +1473,6 @@ L_QUEUE  *lq_pixel;
 
     default:
         L_ERROR("shouldn't get here!\n", procName);
-        break;
     }
 
     lqueueDestroy(&lq_pixel, TRUE);
@@ -1699,7 +1700,6 @@ L_QUEUE  *lq_pixel;
 
             queue_size = lqueueGetCount(lq_pixel);
         }
-
         break;
 
     case 8:
@@ -1934,7 +1934,6 @@ L_QUEUE  *lq_pixel;
 
     default:
         L_ERROR("shouldn't get here!\n", procName);
-        break;
     }
 
     lqueueDestroy(&lq_pixel, TRUE);
@@ -2742,7 +2741,6 @@ l_uint32  *lined;
 
     default:
         L_ERROR("connectivity must be 4 or 8\n", procName);
-        break;
     }
 }
 

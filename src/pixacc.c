@@ -97,8 +97,7 @@ PIXACC  *pixacc;
 
     PROCNAME("pixaccCreate");
 
-    if ((pixacc = (PIXACC *)LEPT_CALLOC(1, sizeof(PIXACC))) == NULL)
-        return (PIXACC *)ERROR_PTR("pixacc not made", procName, NULL);
+    pixacc = (PIXACC *)LEPT_CALLOC(1, sizeof(PIXACC));
     pixacc->w = w;
     pixacc->h = h;
 
@@ -177,7 +176,6 @@ PIXACC  *pixacc;
     pixDestroy(&pixacc->pix);
     LEPT_FREE(pixacc);
     *ppixacc = NULL;
-    return;
 }
 
 

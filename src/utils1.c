@@ -66,14 +66,15 @@
  *           l_int32    fileCorruptByMutation()
  *           l_int32    fileReplaceBytes()
  *
- *       Generate random integer in given range
- *           l_int32    genRandomIntegerInRange()
+ *       Generate random integer in given interval
+ *           l_int32    genRandomIntOnInterval()
  *
  *       Simple math function
  *           l_int32    lept_roundftoi()
  *
  *       64-bit hash functions
  *           l_int32    l_hashStringToUint64()
+ *           l_int32    l_hashStringToUint64Fast()
  *           l_int32    l_hashPtToUint64()
  *           l_int32    l_hashFloat64ToUint64()
  *
@@ -246,10 +247,10 @@ returnErrorPtr(const char  *msg,
  *      void send_to_syslog(const char *msg) {                            *
  *           syslog(1, msg);                                              *
  *      }                                                                 *
- *  These would then be registered using
- *      leptSetStderrHandler(send_to_devnull();
- *  and
- *      leptSetStderrHandler(send_to_syslog();
+ *  These would then be registered using                                  *
+ *      leptSetStderrHandler(send_to_devnull);                            *
+ *  and                                                                   *
+ *      leptSetStderrHandler(send_to_syslog);                             *
  *------------------------------------------------------------------------*/
     /* By default, all messages go to stderr */
 static void lept_default_stderr_handler(const char *formatted_msg)
@@ -643,37 +644,36 @@ l_uint8  *datain, *dataout;
 
 
 /*---------------------------------------------------------------------*
- *                Generate random integer in given range               *
+ *              Generate random integer in given interval              *
  *---------------------------------------------------------------------*/
 /*!
- * \brief   genRandomIntegerInRange()
+ * \brief   genRandomIntOnInterval()
  *
- * \param[in]    range     size of range; must be >= 2
+ * \param[in]    start     beginning of interval; can be < 0
+ * \param[in]    end       end of interval; must be >= start
  * \param[in]    seed      use 0 to skip; otherwise call srand
- * \param[out]   pval      random integer in range {0 ... range-1}
+ * \param[out]   pval      random integer in interval [start ... end]
  * \return  0 if OK, 1 on error
- *
- * <pre>
- * Notes:
- *      (1) For example, to choose a rand integer between 0 and 99,
- *          use %range = 100.
- * </pre>
  */
 l_ok
-genRandomIntegerInRange(l_int32   range,
-                        l_int32   seed,
-                        l_int32  *pval)
+genRandomIntOnInterval(l_int32   start,
+                       l_int32   end,
+                       l_int32   seed,
+                       l_int32  *pval)
 {
-    PROCNAME("genRandomIntegerInRange");
+l_float64  range;
+
+    PROCNAME("genRandomIntOnInterval");
 
     if (!pval)
         return ERROR_INT("&val not defined", procName, 1);
     *pval = 0;
-    if (range < 2)
-        return ERROR_INT("range must be >= 2", procName, 1);
+    if (end < start)
+        return ERROR_INT("invalid range", procName, 1);
 
     if (seed > 0) srand(seed);
-    *pval = (l_int32)((l_float64)range *
+    range = (l_float64)(end - start + 1);
+    *pval = start + (l_int32)((l_float64)range *
                        ((l_float64)rand() / (l_float64)RAND_MAX));
     return 0;
 }
@@ -753,6 +753,44 @@ l_uint64  hash, mulp;
 
 
 /*!
+ * \brief   l_hashStringToUint64Fast()
+ *
+ * \param[in]    str
+ * \param[out]   phash    hash value
+ * \return  0 if OK, 1 on error
+ *
+ * <pre>
+ * Notes:
+ *     (1) This very simple hash algorithm is described in "The Practice
+ *         of Programming" by Kernighan and Pike, p. 57 (1999).
+ *     (2) The returned hash value would then be hashed into an index into
+ *         the hashtable, using the mod operator with the hashtable size.
+ * </pre>
+ */
+l_ok
+l_hashStringToUint64Fast(const char  *str,
+                         l_uint64    *phash)
+{
+l_uint64  h;
+l_uint8  *p;
+
+    PROCNAME("l_hashStringToUint64Fast");
+
+    if (phash) *phash = 0;
+    if (!str || (str[0] == '\0'))
+        return ERROR_INT("str not defined or empty", procName, 1);
+    if (!phash)
+        return ERROR_INT("&hash not defined", procName, 1);
+
+    h = 0;
+    for (p = (l_uint8 *)str; *p != '\0'; p++)
+        h = 37 * h + *p;  /* 37 is good prime number for this */
+    *phash = h;
+    return 0;
+}
+
+
+/*!
  * \brief   l_hashPtToUint64()
  *
  * \param[in]    x, y
@@ -763,15 +801,6 @@ l_uint64  hash, mulp;
  * Notes:
  *      (1) This simple hash function has no collisions for
  *          any of 400 million points with x and y up to 20000.
- *      (2) Previously used a much more complicated and slower function:
- *            mulp = 26544357894361;
- *            hash = 104395301;
- *            hash += (x * mulp) ^ (hash >> 5);
- *            hash ^= (hash << 7);
- *            hash += (y * mulp) ^ (hash >> 7);
- *            hash = hash ^ (hash << 11);
- *          Such logical gymnastics to get coverage over the 2^64
- *          values are not required.
  * </pre>
  */
 l_ok
@@ -792,38 +821,28 @@ l_hashPtToUint64(l_int32    x,
 /*!
  * \brief   l_hashFloat64ToUint64()
  *
- * \param[in]    nbuckets
  * \param[in]    val
- * \param[out]   phash      hash value
+ * \param[out]   phash      hash key
  * \return  0 if OK, 1 on error
  *
  * <pre>
  * Notes:
- *      (1) Simple, fast hash for using dnaHash with 64-bit data
- *          (e.g., sets and histograms).
- *      (2) The resulting hash is called a "key" in a lookup
- *          operation.  The bucket for %val in a dnaHash is simply
- *          found by taking the mod of the hash with the number of
- *          buckets (which is prime).  What gets stored in the
- *          dna in that bucket could depend on use, but for the most
- *          flexibility, we store an index into the associated dna.
- *          This is all that is required for generating either a hash set
- *          or a histogram (an example of a hash map).
- *      (3) For example, to generate a histogram, the histogram dna,
- *          a histogram of unique values aligned with the histogram dna,
- *          and a dnahash hashmap are built.  See l_dnaMakeHistoByHash().
+ *      (1) This is a simple hash for using hashmaps with 64-bit float data.
+ *      (2) The resulting hash is called a "key" in a lookup operation.
+ *          The bucket for %val in a hashmap is then found by taking the mod
+ *          of the hash key with the number of buckets (which is prime).
  * </pre>
  */
 l_ok
-l_hashFloat64ToUint64(l_int32    nbuckets,
-                      l_float64  val,
+l_hashFloat64ToUint64(l_float64  val,
                       l_uint64  *phash)
 {
     PROCNAME("l_hashFloatToUint64");
 
     if (!phash)
         return ERROR_INT("&hash not defined", procName, 1);
-    *phash = (l_uint64)((21.732491 * nbuckets) * val);
+    val = (val >= 0.0) ? 847019.66701 * val : -217324.91613 * val;
+    *phash = (l_uint64)val;
     return 0;
 }
 
@@ -1093,7 +1112,6 @@ struct timeval tv;
     gettimeofday(&tv, NULL);
     if (sec) *sec = (l_int32)tv.tv_sec;
     if (usec) *usec = (l_int32)tv.tv_usec;
-    return;
 }
 
 #elif defined(__Fuchsia__) /* resource.h not implemented on Fuchsia. */
@@ -1102,7 +1120,6 @@ struct timeval tv;
      * are stubbed out.  If they are needed in the future, they
      * can be implemented in Fuchsia using the zircon syscall
      * zx_object_get_info() in ZX_INFOR_THREAD_STATS mode.  */
-
 void
 startTimer(void)
 {
@@ -1228,7 +1245,6 @@ LONGLONG        usecs;
 
     if (sec) *sec = (l_int32) (usecs / 1000000);
     if (usec) *usec = (l_int32) (usecs % 1000000);
-    return;
 }
 
 #endif

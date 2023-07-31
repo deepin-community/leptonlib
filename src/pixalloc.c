@@ -290,7 +290,6 @@ L_PIX_MEM_STORE  *pms;
     LEPT_FREE(pms->firstptr);
     LEPT_FREE(pms);
     CustomPMS = NULL;
-    return;
 }
 
 
@@ -380,8 +379,6 @@ L_PTRA           *pa;
         if (pms->logfile)
             pms->meminuse[level]--;
     }
-
-    return;
 }
 
 
@@ -398,8 +395,7 @@ L_PTRA           *pa;
  *          is freed like normal memory.
  *      (2) If logging is on, only write out allocs that are as large as
  *          the minimum size handled by the memory store.
- *      (3) size_t is %lu on 64 bit platforms and %u on 32 bit platforms.
- *          The C99 platform-independent format specifier for size_t is %zu.
+ *      (3) The C99 platform-independent format specifier for size_t is %zu.
  *          Windows since at least VC-2015 is conforming; we can now use %zu.
  * </pre>
  */
@@ -418,11 +414,13 @@ L_PIX_MEM_STORE  *pms;
     if ((data = (void *)LEPT_CALLOC(nbytes, sizeof(char))) == NULL)
         return (void *)ERROR_PTR("data not made", procName, NULL);
     if (pms->logfile && nbytes >= pms->smallest) {
-        fp = fopenWriteStream(pms->logfile, "a");
-        fprintf(fp, "Alloc %zu bytes at %p\n", nbytes, data);
-        fclose(fp);
+        if ((fp = fopenWriteStream(pms->logfile, "a")) != NULL) {
+            fprintf(fp, "Alloc %zu bytes at %p\n", nbytes, data);
+            fclose(fp);
+        } else {
+            L_ERROR("failed to open stream for %s\n", procName, pms->logfile);
+        }
     }
-
     return data;
 }
 
@@ -531,6 +529,4 @@ L_PIX_MEM_STORE  *pms;
     for (i = 0; i < pms->nlevels; i++)
          lept_stderr(" Level %d (%zu bytes): %d\n", i,
                      pms->sizes[i], pms->memempty[i]);
-
-    return;
 }

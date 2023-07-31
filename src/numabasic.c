@@ -173,8 +173,8 @@
 #include "allheaders.h"
 
     /* Bounds on initial array size */
-static const l_uint32  MaxArraySize = 100000000;  /* for numa */
-static const l_uint32  MaxPtrArraySize = 10000;  /* for numaa */
+static const l_uint32  MaxFloatArraySize = 100000000;  /* for numa */
+static const l_uint32  MaxPtrArraySize = 1000000;  /* for numaa */
 static const l_int32 InitialArraySize = 50;      /*!< n'importe quoi */
 
     /* Static functions */
@@ -197,7 +197,7 @@ NUMA  *na;
 
     PROCNAME("numaCreate");
 
-    if (n <= 0 || n > MaxArraySize)
+    if (n <= 0 || n > MaxFloatArraySize)
         n = InitialArraySize;
 
     na = (NUMA *)LEPT_CALLOC(1, sizeof(NUMA));
@@ -386,7 +386,6 @@ NUMA  *na;
     }
 
     *pna = NULL;
-    return;
 }
 
 
@@ -487,8 +486,10 @@ l_int32  n;
         return ERROR_INT("na not defined", procName, 1);
 
     n = numaGetCount(na);
-    if (n >= na->nalloc)
-        numaExtendArray(na);
+    if (n >= na->nalloc) {
+        if (numaExtendArray(na))
+            return ERROR_INT("extension failed", procName, 1);
+    }
     na->array[n] = val;
     na->n++;
     return 0;
@@ -500,19 +501,31 @@ l_int32  n;
  *
  * \param[in]    na
  * \return  0 if OK, 1 on error
+ *
+ * <pre>
+ * Notes:
+ *      (1) The max number of floats is 100M.
+ * </pre>
  */
 static l_int32
 numaExtendArray(NUMA  *na)
 {
+size_t  oldsize, newsize;
+
     PROCNAME("numaExtendArray");
 
     if (!na)
         return ERROR_INT("na not defined", procName, 1);
+    if (na->nalloc > MaxFloatArraySize)  /* belt & suspenders */
+        return ERROR_INT("na has too many ptrs", procName, 1);
+    oldsize = na->nalloc * sizeof(l_float32);
+    newsize = 2 * oldsize;
+    if (newsize > 4 * MaxFloatArraySize)
+        return ERROR_INT("newsize > 400 MB; too large", procName, 1);
 
     if ((na->array = (l_float32 *)reallocNew((void **)&na->array,
-                                sizeof(l_float32) * na->nalloc,
-                                2 * sizeof(l_float32) * na->nalloc)) == NULL)
-            return ERROR_INT("new ptr array not returned", procName, 1);
+                                             oldsize, newsize)) == NULL)
+        return ERROR_INT("new ptr array not returned", procName, 1);
 
     na->nalloc *= 2;
     return 0;
@@ -548,11 +561,15 @@ l_int32  i, n;
     if (!na)
         return ERROR_INT("na not defined", procName, 1);
     n = numaGetCount(na);
-    if (index < 0 || index > n)
-        return ERROR_INT("index not in {0...n}", procName, 1);
+    if (index < 0 || index > n) {
+        L_ERROR("index %d not in [0,...,%d]\n", procName, index, n);
+        return 1;
+    }
 
-    if (n >= na->nalloc)
-        numaExtendArray(na);
+    if (n >= na->nalloc) {
+        if (numaExtendArray(na))
+            return ERROR_INT("extension failed", procName, 1);
+    }
     for (i = n; i > index; i--)
         na->array[i] = na->array[i - 1];
     na->array[index] = val;
@@ -586,8 +603,10 @@ l_int32  i, n;
     if (!na)
         return ERROR_INT("na not defined", procName, 1);
     n = numaGetCount(na);
-    if (index < 0 || index >= n)
-        return ERROR_INT("index not in {0...n - 1}", procName, 1);
+    if (index < 0 || index >= n) {
+        L_ERROR("index %d not in [0,...,%d]\n", procName, index, n - 1);
+        return 1;
+    }
 
     for (i = index + 1; i < n; i++)
         na->array[i - 1] = na->array[i];
@@ -616,8 +635,10 @@ l_int32  n;
     if (!na)
         return ERROR_INT("na not defined", procName, 1);
     n = numaGetCount(na);
-    if (index < 0 || index >= n)
-        return ERROR_INT("index not in {0...n - 1}", procName, 1);
+    if (index < 0 || index >= n) {
+        L_ERROR("index %d not in [0,...,%d]\n", procName, index, n - 1);
+        return 1;
+    }
 
     na->array[index] = val;
     return 0;
@@ -964,7 +985,7 @@ numaGetParameters(NUMA       *na,
  * \param[in]    na
  * \param[in]    startx  x value corresponding to na[0]
  * \param[in]    delx    difference in x values for the situation where the
- *                       elements of na correspond to the evaulation of a
+ *                       elements of na correspond to the evaluation of a
  *                       function at equal intervals of size %delx
  * \return  0 if OK, 1 on error
  */
@@ -1132,8 +1153,8 @@ NUMA      *na;
     if (fscanf(fp, "Number of numbers = %d\n", &n) != 1)
         return (NUMA *)ERROR_PTR("invalid number of numbers", procName, NULL);
 
-    if (n > MaxArraySize) {
-        L_ERROR("n = %d > %d\n", procName, n, MaxArraySize);
+    if (n > MaxFloatArraySize) {
+        L_ERROR("n = %d > %d\n", procName, n, MaxFloatArraySize);
         return NULL;
     }
     if ((na = numaCreate(n)) == NULL)
@@ -1351,6 +1372,9 @@ FILE    *fp;
     if ((fp = open_memstream((char **)pdata, psize)) == NULL)
         return ERROR_INT("stream not opened", procName, 1);
     ret = numaWriteStream(fp, na);
+    fputc('\0', fp);
+    fclose(fp);
+    *psize = *psize - 1;
 #else
     L_INFO("work-around: writing to a temp file\n", procName);
   #ifdef _WIN32
@@ -1363,8 +1387,8 @@ FILE    *fp;
     ret = numaWriteStream(fp, na);
     rewind(fp);
     *pdata = l_binaryReadStream(fp, psize);
-#endif  /* HAVE_FMEMOPEN */
     fclose(fp);
+#endif  /* HAVE_FMEMOPEN */
     return ret;
 }
 
@@ -1503,8 +1527,6 @@ NUMAA   *naa;
     LEPT_FREE(naa->numa);
     LEPT_FREE(naa);
     *pnaa = NULL;
-
-    return;
 }
 
 
@@ -1547,8 +1569,13 @@ NUMA    *nac;
     }
 
     n = numaaGetCount(naa);
-    if (n >= naa->nalloc)
-        numaaExtendArray(naa);
+    if (n >= naa->nalloc) {
+        if (numaaExtendArray(naa)) {
+            if (copyflag != L_INSERT)
+                numaDestroy(&nac);
+            return ERROR_INT("extension failed", procName, 1);
+        }
+    }
     naa->numa[n] = nac;
     naa->n++;
     return 0;
@@ -1560,19 +1587,31 @@ NUMA    *nac;
  *
  * \param[in]    naa
  * \return  0 if OK, 1 on error
+ *
+ * <pre>
+ * Notes:
+ *      (1) The max number of numa ptrs is 1M.
+ * </pre>
  */
 static l_int32
 numaaExtendArray(NUMAA  *naa)
 {
+size_t  oldsize, newsize;
+
     PROCNAME("numaaExtendArray");
 
     if (!naa)
         return ERROR_INT("naa not defined", procName, 1);
+    if (naa->nalloc > MaxPtrArraySize)  /* belt & suspenders */
+        return ERROR_INT("naa has too many ptrs", procName, 1);
+    oldsize = naa->nalloc * sizeof(NUMA *);
+    newsize = 2 * oldsize;
+    if (newsize > 8 * MaxPtrArraySize)
+        return ERROR_INT("newsize > 8 MB; too large", procName, 1);
 
     if ((naa->numa = (NUMA **)reallocNew((void **)&naa->numa,
-                              sizeof(NUMA *) * naa->nalloc,
-                              2 * sizeof(NUMA *) * naa->nalloc)) == NULL)
-            return ERROR_INT("new ptr array not returned", procName, 1);
+                                         oldsize, newsize)) == NULL)
+        return ERROR_INT("new ptr array not returned", procName, 1);
 
     naa->nalloc *= 2;
     return 0;
@@ -2042,6 +2081,9 @@ FILE    *fp;
     if ((fp = open_memstream((char **)pdata, psize)) == NULL)
         return ERROR_INT("stream not opened", procName, 1);
     ret = numaaWriteStream(fp, naa);
+    fputc('\0', fp);
+    fclose(fp);
+    *psize = *psize - 1;
 #else
     L_INFO("work-around: writing to a temp file\n", procName);
   #ifdef _WIN32
@@ -2054,8 +2096,8 @@ FILE    *fp;
     ret = numaaWriteStream(fp, naa);
     rewind(fp);
     *pdata = l_binaryReadStream(fp, psize);
-#endif  /* HAVE_FMEMOPEN */
     fclose(fp);
+#endif  /* HAVE_FMEMOPEN */
     return ret;
 }
 

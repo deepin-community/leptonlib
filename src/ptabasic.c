@@ -99,8 +99,9 @@
 #include <string.h>
 #include "allheaders.h"
 
-static const l_uint32  MaxPtrArraySize = 10000000;
-static const l_int32 InitialPtrArraySize = 50;      /*!< n'importe quoi */
+static const l_uint32  MaxArraySize = 100000000;  /* 100 million */
+static const l_uint32  MaxPtrArraySize = 10000000;  /* 10 million */
+static const l_int32 InitialArraySize = 50;      /*!< n'importe quoi */
 
     /* Static functions */
 static l_int32 ptaExtendArrays(PTA *pta);
@@ -122,8 +123,8 @@ PTA  *pta;
 
     PROCNAME("ptaCreate");
 
-    if (n <= 0 || n > MaxPtrArraySize)
-        n = InitialPtrArraySize;
+    if (n <= 0 || n > MaxArraySize)
+        n = InitialArraySize;
 
     pta = (PTA *)LEPT_CALLOC(1, sizeof(PTA));
     pta->n = 0;
@@ -211,9 +212,7 @@ PTA  *pta;
         LEPT_FREE(pta->y);
         LEPT_FREE(pta);
     }
-
     *ppta = NULL;
-    return;
 }
 
 
@@ -353,12 +352,14 @@ l_int32  n;
         return ERROR_INT("pta not defined", procName, 1);
 
     n = pta->n;
-    if (n >= pta->nalloc)
-        ptaExtendArrays(pta);
+    if (n >= pta->nalloc) {
+        if (ptaExtendArrays(pta))
+            return ERROR_INT("extension failed", procName, 1);
+    }
+
     pta->x[n] = x;
     pta->y[n] = y;
     pta->n++;
-
     return 0;
 }
 
@@ -368,25 +369,39 @@ l_int32  n;
  *
  * \param[in]    pta
  * \return  0 if OK; 1 on error
+ *
+ * <pre>
+ * Notes:
+ *      (1) Doubles the size of the array.
+ *      (2) The max number of points is 100M.
+ * </pre>
  */
 static l_int32
 ptaExtendArrays(PTA  *pta)
 {
+size_t  oldsize, newsize;
+
     PROCNAME("ptaExtendArrays");
 
     if (!pta)
         return ERROR_INT("pta not defined", procName, 1);
-
+    if (pta->nalloc > MaxArraySize)
+        return ERROR_INT("pta at maximum size; can't extend", procName, 1);
+    oldsize = 4 * pta->nalloc;
+    if (pta->nalloc > MaxArraySize / 2) {
+        newsize = 4 * MaxArraySize;
+        pta->nalloc = MaxArraySize;
+    } else {
+        newsize = 2 * oldsize;
+        pta->nalloc *= 2;
+    }
     if ((pta->x = (l_float32 *)reallocNew((void **)&pta->x,
-                               sizeof(l_float32) * pta->nalloc,
-                               2 * sizeof(l_float32) * pta->nalloc)) == NULL)
+                                          oldsize, newsize)) == NULL)
         return ERROR_INT("new x array not returned", procName, 1);
     if ((pta->y = (l_float32 *)reallocNew((void **)&pta->y,
-                               sizeof(l_float32) * pta->nalloc,
-                               2 * sizeof(l_float32) * pta->nalloc)) == NULL)
+                                          oldsize, newsize)) == NULL)
         return ERROR_INT("new y array not returned", procName, 1);
 
-    pta->nalloc = 2 * pta->nalloc;
     return 0;
 }
 
@@ -415,11 +430,15 @@ l_int32  i, n;
     if (!pta)
         return ERROR_INT("pta not defined", procName, 1);
     n = ptaGetCount(pta);
-    if (index < 0 || index > n)
-        return ERROR_INT("index not in {0...n}", procName, 1);
+    if (index < 0 || index > n) {
+        L_ERROR("index %d not in [0,...,%d]\n", procName, index, n);
+        return 1;
+    }
 
-    if (n > pta->nalloc)
-        ptaExtendArrays(pta);
+    if (n > pta->nalloc) {
+        if (ptaExtendArrays(pta))
+            return ERROR_INT("extension failed", procName, 1);
+    }
     pta->n++;
     for (i = n; i > index; i--) {
         pta->x[i] = pta->x[i - 1];
@@ -456,8 +475,10 @@ l_int32  i, n;
     if (!pta)
         return ERROR_INT("pta not defined", procName, 1);
     n = ptaGetCount(pta);
-    if (index < 0 || index >= n)
-        return ERROR_INT("index not in {0...n - 1}", procName, 1);
+    if (index < 0 || index >= n) {
+        L_ERROR("index %d not in [0,...,%d]\n", procName, index, n - 1);
+        return 1;
+    }
 
         /* Remove the point */
     for (i = index + 1; i < n; i++) {
@@ -688,6 +709,12 @@ PTA   *pta;
  *
  * \param[in]    fp    file stream
  * \return  pta, or NULL on error
+ *
+ * <pre>
+ * Notes:
+ *      (1) It is OK for the pta to be empty (n == 0).
+ * </pre>
+
  */
 PTA *
 ptaReadStream(FILE  *fp)
@@ -708,11 +735,16 @@ PTA       *pta;
         return (PTA *)ERROR_PTR("invalid pta version", procName, NULL);
     if (fscanf(fp, " Number of pts = %d; format = %127s\n", &n, typestr) != 2)
         return (PTA *)ERROR_PTR("not a pta file", procName, NULL);
+    if (n < 0)
+        return (PTA *)ERROR_PTR("num pts <= 0", procName, NULL);
+    if (n > MaxArraySize)
+        return (PTA *)ERROR_PTR("too many pts", procName, NULL);
+    if (n == 0) L_INFO("the pta is empty\n", procName);
+
     if (!strcmp(typestr, "float"))
         type = 0;
     else  /* typestr is "integer" */
         type = 1;
-
     if ((pta = ptaCreate(n)) == NULL)
         return (PTA *)ERROR_PTR("pta not made", procName, NULL);
     for (i = 0; i < n; i++) {
@@ -910,6 +942,9 @@ FILE    *fp;
     if ((fp = open_memstream((char **)pdata, psize)) == NULL)
         return ERROR_INT("stream not opened", procName, 1);
     ret = ptaWriteStream(fp, pta, type);
+    fputc('\0', fp);
+    fclose(fp);
+    *psize = *psize - 1;
 #else
     L_INFO("work-around: writing to a temp file\n", procName);
   #ifdef _WIN32
@@ -922,8 +957,8 @@ FILE    *fp;
     ret = ptaWriteStream(fp, pta, type);
     rewind(fp);
     *pdata = l_binaryReadStream(fp, psize);
-#endif  /* HAVE_FMEMOPEN */
     fclose(fp);
+#endif  /* HAVE_FMEMOPEN */
     return ret;
 }
 
@@ -945,7 +980,7 @@ PTAA  *ptaa;
     PROCNAME("ptaaCreate");
 
     if (n <= 0 || n > MaxPtrArraySize)
-        n = InitialPtrArraySize;
+        n = InitialArraySize;
 
     ptaa = (PTAA *)LEPT_CALLOC(1, sizeof(PTAA));
     ptaa->n = 0;
@@ -983,10 +1018,8 @@ PTAA    *ptaa;
     for (i = 0; i < ptaa->n; i++)
         ptaDestroy(&ptaa->pta[i]);
     LEPT_FREE(ptaa->pta);
-
     LEPT_FREE(ptaa);
     *pptaa = NULL;
-    return;
 }
 
 
@@ -1029,11 +1062,16 @@ PTA     *ptac;
     }
 
     n = ptaaGetCount(ptaa);
-    if (n >= ptaa->nalloc)
-        ptaaExtendArray(ptaa);
+    if (n >= ptaa->nalloc) {
+        if (ptaaExtendArray(ptaa)) {
+            if (copyflag != L_INSERT)
+                ptaDestroy(&ptac);
+            return ERROR_INT("extension failed", procName, 1);
+        }
+    }
+
     ptaa->pta[n] = ptac;
     ptaa->n++;
-
     return 0;
 }
 
@@ -1043,21 +1081,33 @@ PTA     *ptac;
  *
  * \param[in]    ptaa
  * \return  0 if OK, 1 on error
+ *
+ * <pre>
+ * Notes:
+ *      (1) This doubles the pta ptr array size.
+ *      (2) The max number of pta ptrs is 10M.
+ * </pre>
+ *
  */
 static l_int32
 ptaaExtendArray(PTAA  *ptaa)
 {
+size_t  oldsize, newsize;
+
     PROCNAME("ptaaExtendArray");
 
     if (!ptaa)
         return ERROR_INT("ptaa not defined", procName, 1);
+    oldsize = ptaa->nalloc * sizeof(PTA *);
+    newsize = 2 * oldsize;
+    if (newsize > 8 * MaxPtrArraySize)
+        return ERROR_INT("newsize > 80 MB; too large", procName, 1);
 
     if ((ptaa->pta = (PTA **)reallocNew((void **)&ptaa->pta,
-                             sizeof(PTA *) * ptaa->nalloc,
-                             2 * sizeof(PTA *) * ptaa->nalloc)) == NULL)
+                                        oldsize, newsize)) == NULL)
         return ERROR_INT("new ptr array not returned", procName, 1);
 
-    ptaa->nalloc = 2 * ptaa->nalloc;
+    ptaa->nalloc *= 2;
     return 0;
 }
 
@@ -1333,6 +1383,11 @@ PTAA  *ptaa;
  *
  * \param[in]    fp    file stream
  * \return  ptaa, or NULL on error
+ *
+ * <pre>
+ * Notes:
+ *      (1) It is OK for the ptaa to be empty (n == 0).
+ * </pre>
  */
 PTAA *
 ptaaReadStream(FILE  *fp)
@@ -1352,6 +1407,11 @@ PTAA    *ptaa;
         return (PTAA *)ERROR_PTR("invalid ptaa version", procName, NULL);
     if (fscanf(fp, "Number of Pta = %d\n", &n) != 1)
         return (PTAA *)ERROR_PTR("not a ptaa file", procName, NULL);
+    if (n < 0)
+        return (PTAA *)ERROR_PTR("num pta ptrs <= 0", procName, NULL);
+    if (n > MaxPtrArraySize)
+        return (PTAA *)ERROR_PTR("too many pta ptrs", procName, NULL);
+    if (n == 0) L_INFO("the ptaa is empty\n", procName);
 
     if ((ptaa = ptaaCreate(n)) == NULL)
         return (PTAA *)ERROR_PTR("ptaa not made", procName, NULL);
@@ -1535,6 +1595,9 @@ FILE    *fp;
     if ((fp = open_memstream((char **)pdata, psize)) == NULL)
         return ERROR_INT("stream not opened", procName, 1);
     ret = ptaaWriteStream(fp, ptaa, type);
+    fputc('\0', fp);
+    fclose(fp);
+    *psize = *psize - 1;
 #else
     L_INFO("work-around: writing to a temp file\n", procName);
   #ifdef _WIN32
@@ -1547,7 +1610,7 @@ FILE    *fp;
     ret = ptaaWriteStream(fp, ptaa, type);
     rewind(fp);
     *pdata = l_binaryReadStream(fp, psize);
-#endif  /* HAVE_FMEMOPEN */
     fclose(fp);
+#endif  /* HAVE_FMEMOPEN */
     return ret;
 }

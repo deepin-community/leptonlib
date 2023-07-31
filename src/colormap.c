@@ -58,6 +58,7 @@
  *           l_int32     pixcmapGetIndex()
  *           l_int32     pixcmapHasColor()
  *           l_int32     pixcmapIsOpaque()
+ *           l_int32     pixcmapNonOpaqueColorsInfo()
  *           l_int32     pixcmapIsBlackAndWhite()
  *           l_int32     pixcmapCountGrayColors()
  *           l_int32     pixcmapGetRankIntensity()
@@ -67,6 +68,7 @@
  *           l_int32     pixcmapGetRangeValues()
  *
  *      Colormap conversion
+ *           PIXCMAP    *pixcmapGrayToFalseColor()
  *           PIXCMAP    *pixcmapGrayToColor()
  *           PIXCMAP    *pixcmapColorToGray()
  *           PIXCMAP    *pixcmapConvertTo4()
@@ -106,6 +108,7 @@
 #include <config_auto.h>
 #endif  /* HAVE_CONFIG_H */
 
+#include <math.h>
 #include <string.h>
 #include "allheaders.h"
 
@@ -251,7 +254,7 @@ PIXCMAP  *cmapd;
 
     if (!cmaps)
         return (PIXCMAP *)ERROR_PTR("cmaps not defined", procName, NULL);
-    pixcmapIsValid(cmaps, &valid);
+    pixcmapIsValid(cmaps, NULL, &valid);
     if (!valid)
         return (PIXCMAP *)ERROR_PTR("invalid cmap", procName, NULL);
 
@@ -290,21 +293,32 @@ PIXCMAP  *cmap;
     LEPT_FREE(cmap->array);
     LEPT_FREE(cmap);
     *pcmap = NULL;
-    return;
 }
 
 /*!
  * \brief   pixcmapIsValid()
  *
  * \param[in]    cmap
+ * \param[in]    pix        optional; can be NULL
  * \param[out]   pvalid     return 1 if valid; 0 if not
  * \return  0 if OK, 1 on error or if cmap is not valid
+ *
+ * <pre>
+ * Notes:
+ *      (1) If %pix is input, this will verify that pixel values cannot
+ *          overflow the colormap.  This is a relatively expensive operation
+ *          that may need to check all the pixel values.
+ *      (2) If %pix is input, there must be at least one color in the
+ *          colormap if it is to be valid with any pix, even if the
+ *          pixels are all 0.
+ * </pre>
  */
 l_ok
 pixcmapIsValid(const PIXCMAP  *cmap,
+               PIX            *pix,
                l_int32        *pvalid)
 {
-l_int32  d;
+l_int32  d, depth, nalloc, maxindex, maxcolors;
 
     PROCNAME("pixcmapIsValid");
 
@@ -316,19 +330,67 @@ l_int32  d;
     if (!cmap->array)
         return ERROR_INT("cmap array not defined", procName, 1);
     d = cmap->depth;
-    if (d !=1 && d != 2 && d != 4 && d != 8) {
+    if (d != 1 && d != 2 && d != 4 && d != 8) {
         L_ERROR("invalid cmap depth: %d\n", procName, d);
         return 1;
     }
-    if (cmap->nalloc < 2 || cmap->nalloc > 256) {
-        L_ERROR("invalid cmap nalloc: %d\n", procName, cmap->nalloc);
+    nalloc = cmap->nalloc;
+    if (nalloc != (1 << d)) {
+        L_ERROR("invalid cmap nalloc = %d; d = %d\n", procName, nalloc, d);
         return 1;
     }
-    if (cmap->n < 0 || cmap->n > 256 || cmap->n > cmap->nalloc) {
-        L_ERROR("invalid cmap n: %d (nalloc = %d)\n", procName,
-                cmap->n, cmap->nalloc);
+    if (cmap->n < 0 || cmap->n > nalloc) {
+        L_ERROR("invalid cmap n: %d; nalloc = %d\n", procName, cmap->n, nalloc);
         return 1;
     }
+
+        /* If a pix is given, it must have a depth no larger than 8 */
+    if (pix) {
+        depth = pixGetDepth(pix);
+        if (depth > 8) {
+            L_ERROR("pix depth %d > 8\n", procName, depth);
+            return 1;
+        }
+        maxcolors = 1 << depth;
+    }
+
+        /* To prevent indexing overflow into the cmap, the pix depth
+         * must not exceed the cmap depth.  Do not require depth equality,
+         * because some functions such as median cut quantizers allow
+         * the cmap depth to be bigger than the pix depth. */
+    if (pix && (depth > d)) {
+        L_ERROR("(pix depth = %d) > (cmap depth = %d)\n", procName, depth, d);
+        return 1;
+    }
+    if (pix && cmap->n < 1) {
+        L_ERROR("cmap array is empty; invalid with any pix\n", procName);
+        return 1;
+    }
+
+        /* Do not let the colormap have more colors than the pixels
+         * can address.  The png encoder considers this to be an
+         * "invalid palette length".  For example, for 1 bpp, the
+         * colormap may have a depth > 1, but it must not have more
+         * than 2 colors. */
+    if (pix && (cmap->n > maxcolors)) {
+        L_ERROR("cmap entries = %d > max colors for pix = %d\n", procName,
+                cmap->n, maxcolors);
+        return 1;
+    }
+
+        /* Where the colormap or the pix may have been corrupted, and
+         * in particular when reading or writing image files, it should
+         * be verified that the image pixel values do not exceed the
+         * max indexing into the colormap array. */
+    if (pix) {
+        pixGetMaxColorIndex(pix, &maxindex);
+        if (maxindex >= cmap->n) {
+            L_ERROR("(max index = %d) >= (num colors = %d)\n", procName,
+                    maxindex, cmap->n);
+            return 1;
+        }
+    }
+
     *pvalid = 1;
     return 0;
 }
@@ -1076,6 +1138,77 @@ RGBA_QUAD  *cta;
 
 
 /*!
+ * \brief   pixcmapNonOpaqueColorsInfo()
+ *
+ * \param[in]    cmap
+ * \param[out]   pntrans         [optional] number of transparent alpha
+ *                                          entries; <= 256
+ * \param[out]   pmax_trans      [optional] max index of transparent alpha
+ * \param[out]   pmin_opaque     [optional] min index of opaque < 256
+ * \return  0 if OK, 1 on error
+ *
+ * <pre>
+ * Notes:
+ *      (1) This is used, for clarity, when writing the png tRNS palette.
+ *          According to the spec, http://www.w3.org/TR/PNG/#11tRNS,
+ *          if the tRNS palette is of size ntrans, the palette uses the first
+ *          ntrans alpha entries in the cmap, and the remaining alpha values
+ *          are assumed to be 255 (opaque), regardless of cmap alpha value.
+ *      (2) Ordinarily, the non-opaque colors come first in the cmap, so
+ *               min_opaque > max_trans
+ *          and
+ *               ntrans = max_trans + 1 = min_opaque.
+ *          But this does not happen in general.  In trans-2bpp-palette.png,
+ *          for example, only the third of four entries is not opaque, so
+ *               ntrans = 1
+ *               max_trans = 2 (index is 0-based)
+ *               min_opaque = 0
+ *          The tRNS palette must extend to the third entry to cover the
+ *          color with transparency: use 3 as the fourth arg to png_set_tRNS().
+ *      (3) If all entries are opaque, max_trans = -1.
+ *          If all entries are transparent, min_opaque = size of cmap.
+ * </pre>
+ */
+l_ok
+pixcmapNonOpaqueColorsInfo(PIXCMAP  *cmap,
+                           l_int32  *pntrans,
+                           l_int32  *pmax_trans,
+                           l_int32  *pmin_opaque)
+{
+l_int32     i, n, ntrans, max_trans, min_opaque, opaque_found;
+RGBA_QUAD  *cta;
+
+    PROCNAME("pixcmapCountNonOpaqueColors");
+
+    if (pntrans) *pntrans = 0;
+    if (pmax_trans) *pmax_trans = -1;
+    if (pmin_opaque) *pmin_opaque = 256;
+    if (!cmap)
+        return ERROR_INT("cmap not defined", procName, 1);
+
+    n = pixcmapGetCount(cmap);
+    ntrans = 0;
+    max_trans = -1;
+    min_opaque = n;
+    cta = (RGBA_QUAD *)cmap->array;
+    opaque_found = FALSE;
+    for (i = 0; i < n; i++) {
+        if (cta[i].alpha != 255) {
+            ntrans++;
+            max_trans = i;
+        } else if (opaque_found == FALSE) {
+            opaque_found = TRUE;
+            min_opaque = i;
+        }
+    }
+    if (pntrans) *pntrans = ntrans;
+    if (pmax_trans) *pmax_trans = max_trans;
+    if (pmin_opaque) *pmin_opaque = min_opaque;
+    return 0;
+}
+
+
+/*!
  * \brief   pixcmapIsBlackAndWhite()
  *
  * \param[in]    cmap
@@ -1465,6 +1598,68 @@ l_int32  i, n, imin, imax, minval, maxval, rval, gval, bval, aveval;
  *                       Colormap conversion                   *
  *-------------------------------------------------------------*/
 /*!
+ * \brief   pixcmapGrayToFalseColor()
+ *
+ * \param[in]    gamma   (factor) 0.0 or 1.0 for default; > 1.0 for brighter;
+ *                       2.0 is quite nice
+ * \return  cmap, or NULL on error
+ *
+ * <pre>
+ * Notes:
+ *      (1) This creates a colormap that maps from gray to false colors.
+ *          The colormap is modeled after the Matlap "jet" configuration.
+ * </pre>
+ */
+PIXCMAP *
+pixcmapGrayToFalseColor(l_float32 gamma)
+{
+l_int32    i, rval, gval, bval;
+l_int32   *curve;
+l_float32  invgamma, x;
+PIXCMAP   *cmap;
+
+    if (gamma <= 0.0) gamma = 1.0;
+
+        /* Generate curve for transition part of color map */
+    curve = (l_int32 *)LEPT_CALLOC(64, sizeof(l_int32));
+    invgamma = 1. / gamma;
+    for (i = 0; i < 64; i++) {
+        x = (l_float32)i / 64.;
+        curve[i] = (l_int32)(255. * powf(x, invgamma) + 0.5);
+    }
+
+    cmap = pixcmapCreate(8);
+    for (i = 0; i < 256; i++) {
+        if (i < 32) {
+            rval = 0;
+            gval = 0;
+            bval = curve[i + 32];
+        } else if (i < 96) {   /* 32 - 95 */
+            rval = 0;
+            gval = curve[i - 32];
+            bval = 255;
+        } else if (i < 160) {  /* 96 - 159 */
+            rval = curve[i - 96];
+            gval = 255;
+            bval = curve[159 - i];
+        } else if (i < 224) {  /* 160 - 223 */
+            rval = 255;
+            gval = curve[223 - i];
+            bval = 0;
+        } else {  /* 224 - 255 */
+            rval = curve[287 - i];
+            gval = 0;
+            bval = 0;
+        }
+        pixcmapAddColor(cmap, rval, gval, bval);
+    }
+
+    LEPT_FREE(curve);
+    return cmap;
+}
+
+
+/*!
  * \brief   pixcmapGrayToColor()
  *
  * \param[in]    color
@@ -1685,7 +1880,8 @@ PIXCMAP  *cmap;
     ignore = fscanf(fp, "Color    R-val    G-val    B-val   Alpha\n");
     ignore = fscanf(fp, "----------------------------------------\n");
 
-    cmap = pixcmapCreate(depth);
+    if ((cmap = pixcmapCreate(depth)) == NULL)
+        return (PIXCMAP *)ERROR_PTR("cmap not made", procName, NULL);
     for (i = 0; i < ncolors; i++) {
         if (fscanf(fp, "%3d       %3d      %3d      %3d      %3d\n",
                         &index, &rval, &gval, &bval, &aval) != 5) {
@@ -1834,6 +2030,9 @@ FILE    *fp;
     if ((fp = open_memstream((char **)pdata, psize)) == NULL)
         return ERROR_INT("stream not opened", procName, 1);
     ret = pixcmapWriteStream(fp, cmap);
+    fputc('\0', fp);
+    fclose(fp);
+    *psize = *psize - 1;
 #else
     L_INFO("work-around: writing to a temp file\n", procName);
   #ifdef _WIN32
@@ -1846,8 +2045,8 @@ FILE    *fp;
     ret = pixcmapWriteStream(fp, cmap);
     rewind(fp);
     *pdata = l_binaryReadStream(fp, psize);
-#endif  /* HAVE_FMEMOPEN */
     fclose(fp);
+#endif  /* HAVE_FMEMOPEN */
     return ret;
 }
 
@@ -1859,8 +2058,10 @@ FILE    *fp;
  * \brief   pixcmapToArrays()
  *
  * \param[in]    cmap     colormap
- * \param[out]   prmap,   pgmap, pbmap colormap arrays
- * \param[out]   pamap    [optional] alpha array
+ * \param[out]   prmap    array of red values
+ * \param[out]   pgmap    array of green values
+ * \param[out]   pbmap    array of blue values
+ * \param[out]   pamap    [optional] array of alpha (transparency) values
  * \return  0 if OK; 1 on error
  */
 l_ok
@@ -2003,7 +2204,7 @@ l_uint8  *data;
  *
  * \param[in]    data      binary string, 3 or 4 bytes per color
  * \param[in]    cpc       components/color: 3 for rgb, 4 for rgba
- * \param[in]    ncolors
+ * \param[in]    ncolors   > 0
  * \return  cmap, or NULL on error
  */
 PIXCMAP *
@@ -2020,7 +2221,7 @@ PIXCMAP  *cmap;
         return (PIXCMAP *)ERROR_PTR("data not defined", procName, NULL);
     if (cpc != 3 && cpc != 4)
         return (PIXCMAP *)ERROR_PTR("cpc not 3 or 4", procName, NULL);
-    if (ncolors == 0)
+    if (ncolors <= 0)
         return (PIXCMAP *)ERROR_PTR("no entries", procName, NULL);
     if (ncolors > 256)
         return (PIXCMAP *)ERROR_PTR("ncolors > 256", procName, NULL);

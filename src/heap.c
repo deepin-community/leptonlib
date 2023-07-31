@@ -30,7 +30,7 @@
  *
  *      Create/Destroy L_Heap
  *          L_HEAP         *lheapCreate()
- *          void           *lheapDestroy()
+ *          void            lheapDestroy()
  *
  *      Operations to add/remove to/from the heap
  *          l_int32         lheapAdd()
@@ -177,8 +177,6 @@ L_HEAP  *lh;
         LEPT_FREE(lh->array);
     LEPT_FREE(lh);
     *plh = NULL;
-
-    return;
 }
 
 /*--------------------------------------------------------------------------*
@@ -203,8 +201,10 @@ lheapAdd(L_HEAP  *lh,
         return ERROR_INT("item not defined", procName, 1);
 
         /* If necessary, expand the allocated array by a factor of 2 */
-    if (lh->n >= lh->nalloc)
-        lheapExtendArray(lh);
+    if (lh->n >= lh->nalloc) {
+        if (lheapExtendArray(lh))
+            return ERROR_INT("extension failed", procName, 1);
+    }
 
         /* Add the item */
     lh->array[lh->n] = item;
@@ -304,7 +304,7 @@ lheapGetCount(L_HEAP  *lh)
  *          heap array without disturbing the heap.  It allows all the
  *          elements on the heap to be queried in linear time; for
  *          example, to find the min or max of some value.
- *      (2) Tbe retrieved element is owned by the heap.  Do not destroy it.
+ *      (2) The retrieved element is owned by the heap.  Do not destroy it.
  * </pre>
  */
 void *

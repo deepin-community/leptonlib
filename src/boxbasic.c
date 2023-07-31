@@ -138,9 +138,10 @@
 #include <string.h>
 #include "allheaders.h"
 
-    /* Bounds on initial array size */
-static const l_uint32  MaxPtrArraySize = 1000000;
-static const l_int32 InitialPtrArraySize = 20;      /*!< n'importe quoi */
+    /* Bounds on array sizes */
+static const size_t  MaxBoxaPtrArraySize = 10000000;
+static const size_t  MaxBoxaaPtrArraySize = 1000000;
+static const size_t  InitialPtrArraySize = 20;      /*!< n'importe quoi */
 
 /*---------------------------------------------------------------------*
  *                  Box creation, destruction and copy                 *
@@ -295,7 +296,6 @@ BOX  *box;
     if (boxGetRefcount(box) <= 0)
         LEPT_FREE(box);
     *pbox = NULL;
-    return;
 }
 
 
@@ -505,7 +505,7 @@ BOXA  *boxa;
 
     PROCNAME("boxaCreate");
 
-    if (n <= 0 || n > MaxPtrArraySize)
+    if (n <= 0 || n > MaxBoxaPtrArraySize)
         n = InitialPtrArraySize;
 
     boxa = (BOXA *)LEPT_CALLOC(1, sizeof(BOXA));
@@ -605,7 +605,6 @@ BOXA    *boxa;
     }
 
     *pboxa = NULL;
-    return;
 }
 
 
@@ -644,11 +643,15 @@ BOX     *boxc;
         return ERROR_INT("boxc not made", procName, 1);
 
     n = boxaGetCount(boxa);
-    if (n >= boxa->nalloc)
-        boxaExtendArray(boxa);
+    if (n >= boxa->nalloc) {
+        if (boxaExtendArray(boxa)) {
+            if (copyflag != L_INSERT)
+                boxDestroy(&boxc);
+            return ERROR_INT("extension failed", procName, 1);
+        }
+    }
     boxa->box[n] = boxc;
     boxa->n++;
-
     return 0;
 }
 
@@ -680,30 +683,40 @@ boxaExtendArray(BOXA  *boxa)
  * \brief   boxaExtendArrayToSize()
  *
  * \param[in]    boxa
- * \param[in]    size     new size of boxa array
+ * \param[in]    size     new size of boxa ptr array
  * \return  0 if OK; 1 on error
  *
  * <pre>
  * Notes:
  *      (1) If necessary, reallocs new boxa ptr array to %size.
+ *      (2) The max number of box ptrs is 10M.
  * </pre>
  */
 l_ok
-boxaExtendArrayToSize(BOXA    *boxa,
-                      l_int32  size)
+boxaExtendArrayToSize(BOXA   *boxa,
+                      size_t  size)
 {
+size_t  oldsize, newsize;
+
     PROCNAME("boxaExtendArrayToSize");
 
     if (!boxa)
         return ERROR_INT("boxa not defined", procName, 1);
-
-    if (size > boxa->nalloc) {
-        if ((boxa->box = (BOX **)reallocNew((void **)&boxa->box,
-                                            sizeof(BOX *) * boxa->nalloc,
-                                            size * sizeof(BOX *))) == NULL)
-            return ERROR_INT("new ptr array not returned", procName, 1);
-        boxa->nalloc = size;
+    if (boxa->nalloc > MaxBoxaPtrArraySize)  /* belt & suspenders */
+        return ERROR_INT("boxa has too many ptrs", procName, 1);
+    if (size > MaxBoxaPtrArraySize)
+        return ERROR_INT("size > 10M box ptrs; too large", procName, 1);
+    if (size <= boxa->nalloc) {
+        L_INFO("size too small; no extension\n", procName);
+        return 0;
     }
+
+    oldsize = boxa->nalloc * sizeof(BOX *);
+    newsize = size * sizeof(BOX *);
+    if ((boxa->box = (BOX **)reallocNew((void **)&boxa->box,
+                                        oldsize, newsize)) == NULL)
+        return ERROR_INT("new ptr array not returned", procName, 1);
+    boxa->nalloc = size;
     return 0;
 }
 
@@ -996,19 +1009,22 @@ BOX    **array;
     if (!boxa)
         return ERROR_INT("boxa not defined", procName, 1);
     n = boxaGetCount(boxa);
-    if (index < 0 || index > n)
-        return ERROR_INT("index not in {0...n}", procName, 1);
+    if (index < 0 || index > n) {
+        L_ERROR("index %d not in [0,...,%d]\n", procName, index, n);
+        return 1;
+    }
     if (!box)
         return ERROR_INT("box not defined", procName, 1);
 
-    if (n >= boxa->nalloc)
-        boxaExtendArray(boxa);
+    if (n >= boxa->nalloc) {
+        if (boxaExtendArray(boxa))
+            return ERROR_INT("extension failed", procName, 1);
+    }
     array = boxa->box;
     boxa->n++;
     for (i = n; i > index; i--)
         array[i] = array[i - 1];
     array[index] = box;
-
     return 0;
 }
 
@@ -1066,8 +1082,10 @@ BOX    **array;
     if (!boxa)
         return ERROR_INT("boxa not defined", procName, 1);
     n = boxaGetCount(boxa);
-    if (index < 0 || index >= n)
-        return ERROR_INT("index not in {0...n - 1}", procName, 1);
+    if (index < 0 || index >= n) {
+        L_ERROR("index %d not in [0,...,%d]\n", procName, index, n - 1);
+        return 1;
+    }
 
     if (pbox)
         *pbox = boxaGetBox(boxa, index, L_CLONE);
@@ -1229,7 +1247,7 @@ BOXAA  *baa;
 
     PROCNAME("boxaaCreate");
 
-    if (n <= 0 || n > MaxPtrArraySize)
+    if (n <= 0 || n > MaxBoxaaPtrArraySize)
         n = InitialPtrArraySize;
 
     baa = (BOXAA *)LEPT_CALLOC(1, sizeof(BOXAA));
@@ -1309,8 +1327,6 @@ BOXAA   *baa;
     LEPT_FREE(baa->boxa);
     LEPT_FREE(baa);
     *pbaa = NULL;
-
-    return;
 }
 
 
@@ -1349,8 +1365,10 @@ BOXA    *bac;
         bac = boxaCopy(ba, copyflag);
 
     n = boxaaGetCount(baa);
-    if (n >= baa->nalloc)
-        boxaaExtendArray(baa);
+    if (n >= baa->nalloc) {
+        if (boxaaExtendArray(baa))
+            return ERROR_INT("extension failed", procName, 1);
+    }
     baa->boxa[n] = bac;
     baa->n++;
     return 0;
@@ -1362,23 +1380,22 @@ BOXA    *bac;
  *
  * \param[in]    baa
  * \return  0 if OK, 1 on error
+ *
+ * <pre>
+ * Notes:
+ *      (1) Doubles the size of the boxa ptr array.
+ *      (2) The max number of boxa ptrs is 1 million.
+ * </pre>
  */
 l_ok
 boxaaExtendArray(BOXAA  *baa)
 {
-
     PROCNAME("boxaaExtendArray");
 
     if (!baa)
         return ERROR_INT("baa not defined", procName, 1);
 
-    if ((baa->boxa = (BOXA **)reallocNew((void **)&baa->boxa,
-                              sizeof(BOXA *) * baa->nalloc,
-                              2 * sizeof(BOXA *) * baa->nalloc)) == NULL)
-            return ERROR_INT("new ptr array not returned", procName, 1);
-
-    baa->nalloc *= 2;
-    return 0;
+    return boxaaExtendArrayToSize(baa, 2 * baa->nalloc);
 }
 
 
@@ -1392,24 +1409,34 @@ boxaaExtendArray(BOXAA  *baa)
  * <pre>
  * Notes:
  *      (1) If necessary, reallocs the boxa ptr array to %size.
+ *      (2) %size limited to 1M boxa ptrs.
  * </pre>
  */
 l_ok
 boxaaExtendArrayToSize(BOXAA   *baa,
                        l_int32  size)
 {
+size_t  oldsize, newsize;
+
     PROCNAME("boxaaExtendArrayToSize");
 
     if (!baa)
         return ERROR_INT("baa not defined", procName, 1);
-
-    if (size > baa->nalloc) {
-        if ((baa->boxa = (BOXA **)reallocNew((void **)&baa->boxa,
-                                             sizeof(BOXA *) * baa->nalloc,
-                                             size * sizeof(BOXA *))) == NULL)
-            return ERROR_INT("new ptr array not returned", procName, 1);
-        baa->nalloc = size;
+    if (baa->nalloc > MaxBoxaaPtrArraySize)  /* belt & suspenders */
+        return ERROR_INT("baa has too many ptrs", procName, 1);
+    if (size > MaxBoxaaPtrArraySize)
+        return ERROR_INT("size > 1M boxa ptrs; too large", procName, 1);
+    if (size <= baa->nalloc) {
+        L_INFO("size too small; no extension\n", procName);
+        return 0;
     }
+
+    oldsize = baa->nalloc * sizeof(BOXA *);
+    newsize = size * sizeof(BOXA *);
+    if ((baa->boxa = (BOXA **)reallocNew((void **)&baa->boxa,
+                                         oldsize, newsize)) == NULL)
+        return ERROR_INT("new ptr array not returned", procName, 1);
+    baa->nalloc = size;
     return 0;
 }
 
@@ -1536,16 +1563,16 @@ BOXA  *boxa;
  *          with copies of %boxa.  Any existing boxa are destroyed.
  *          After this operation, the number of boxa is equal to
  *          the number of allocated ptrs.
- *      (2) Note that we use boxaaReplaceBox() instead of boxaInsertBox().
- *          They both have the same effect when inserting into a NULL ptr
- *          in the boxa ptr array
+ *      (2) Note that we use boxaaReplaceBoxa() which replaces a boxa,
+ *          instead of boxaaInsertBoxa(), which is O(n) and shifts all
+ *          the boxa pointers from the insertion point to the end.
  *      (3) Example usage.  This function is useful to prepare for a
  *          random insertion (or replacement) of boxa into a boxaa.
  *          To randomly insert boxa into a boxaa, up to some index "max":
  *             Boxaa *baa = boxaaCreate(max);
  *               // initialize the boxa
  *             Boxa *boxa = boxaCreate(...);
- *             ...  [optionally fix with boxes]
+ *             ...  [optionally fill with boxes]
  *             boxaaInitFull(baa, boxa);
  *          A typical use is to initialize the array with empty boxa,
  *          and to replace only a subset that must be aligned with
@@ -1609,7 +1636,8 @@ l_int32  i, n;
         /* Extend the ptr array if necessary */
     n = boxaaGetCount(baa);
     if (maxindex < n) return 0;
-    boxaaExtendArrayToSize(baa, maxindex + 1);
+    if (boxaaExtendArrayToSize(baa, maxindex + 1))
+        return ERROR_INT("extension failed", procName, 1);
 
         /* Fill the new entries with copies of boxa */
     for (i = n; i <= maxindex; i++)
@@ -1667,9 +1695,10 @@ l_int32  n;
  * <pre>
  * Notes:
  *      (1) This shifts boxa[i] --> boxa[i + 1] for all i >= index,
- *          and then inserts boxa as boxa[index].
- *      (2) To insert at the beginning of the array, set index = 0.
- *      (3) To append to the array, it's easier to use boxaaAddBoxa().
+ *          and then inserts boxa as boxa[index].  It is typically used
+ *          when %baa is full of boxa.
+ *      (2) To insert at the beginning of the array, set %index = 0.
+ *      (3) To append to the array, it is equivalent to boxaaAddBoxa().
  *      (4) This should not be used repeatedly to insert into large arrays,
  *          because the function is O(n).
  * </pre>
@@ -1687,19 +1716,22 @@ BOXA   **array;
     if (!baa)
         return ERROR_INT("baa not defined", procName, 1);
     n = boxaaGetCount(baa);
-    if (index < 0 || index > n)
-        return ERROR_INT("index not in {0...n}", procName, 1);
+    if (index < 0 || index > n) {
+        L_ERROR("index %d not in [0,...,%d]\n", procName, index, n);
+        return 1;
+    }
     if (!boxa)
         return ERROR_INT("boxa not defined", procName, 1);
 
-    if (n >= baa->nalloc)
-        boxaaExtendArray(baa);
+    if (n >= baa->nalloc) {
+        if (boxaaExtendArray(baa))
+            return ERROR_INT("extension failed", procName, 1);
+    }
     array = baa->boxa;
     baa->n++;
     for (i = n; i > index; i--)
         array[i] = array[i - 1];
     array[index] = boxa;
-
     return 0;
 }
 
@@ -1878,6 +1910,11 @@ BOXAA  *baa;
  *
  * \param[in]    fp    input file stream
  * \return  boxaa, or NULL on error
+ *
+ * <pre>
+ * Notes:
+ *      (1) It is OK for the boxaa to be empty (n == 0).
+ * </pre>
  */
 BOXAA *
 boxaaReadStream(FILE  *fp)
@@ -1898,6 +1935,11 @@ BOXAA   *baa;
         return (BOXAA *)ERROR_PTR("invalid boxa version", procName, NULL);
     if (fscanf(fp, "Number of boxa = %d\n", &n) != 1)
         return (BOXAA *)ERROR_PTR("not a boxaa file", procName, NULL);
+    if (n < 0)
+        return (BOXAA *)ERROR_PTR("num boxa ptrs < 0", procName, NULL);
+    if (n > MaxBoxaaPtrArraySize)
+        return (BOXAA *)ERROR_PTR("too many boxa ptrs", procName, NULL);
+    if (n == 0) L_INFO("the boxaa is empty\n", procName);
 
     if ((baa = boxaaCreate(n)) == NULL)
         return (BOXAA *)ERROR_PTR("boxaa not made", procName, NULL);
@@ -2053,6 +2095,9 @@ FILE    *fp;
     if ((fp = open_memstream((char **)pdata, psize)) == NULL)
         return ERROR_INT("stream not opened", procName, 1);
     ret = boxaaWriteStream(fp, baa);
+    fputc('\0', fp);
+    fclose(fp);
+    *psize = *psize - 1;
 #else
     L_INFO("work-around: writing to a temp file\n", procName);
   #ifdef _WIN32
@@ -2065,8 +2110,8 @@ FILE    *fp;
     ret = boxaaWriteStream(fp, baa);
     rewind(fp);
     *pdata = l_binaryReadStream(fp, psize);
-#endif  /* HAVE_FMEMOPEN */
     fclose(fp);
+#endif  /* HAVE_FMEMOPEN */
     return ret;
 }
 
@@ -2106,6 +2151,11 @@ BOXA  *boxa;
  *
  * \param[in]    fp   input file stream
  * \return  boxa, or NULL on error
+ *
+ * <pre>
+ * Notes:
+ *      (1) It is OK for the boxa to be empty (n == 0).
+ * </pre>
  */
 BOXA *
 boxaReadStream(FILE  *fp)
@@ -2126,6 +2176,11 @@ BOXA    *boxa;
         return (BOXA *)ERROR_PTR("invalid boxa version", procName, NULL);
     if (fscanf(fp, "Number of boxes = %d\n", &n) != 1)
         return (BOXA *)ERROR_PTR("not a boxa file", procName, NULL);
+    if (n < 0)
+        return (BOXA *)ERROR_PTR("num box ptrs < 0", procName, NULL);
+    if (n > MaxBoxaPtrArraySize)
+        return (BOXA *)ERROR_PTR("too many box ptrs", procName, NULL);
+    if (n == 0) L_INFO("the boxa is empty\n", procName);
 
     if ((boxa = boxaCreate(n)) == NULL)
         return (BOXA *)ERROR_PTR("boxa not made", procName, NULL);
@@ -2138,7 +2193,6 @@ BOXA    *boxa;
         box = boxCreate(x, y, w, h);
         boxaAddBox(boxa, box, L_INSERT);
     }
-
     return boxa;
 }
 
@@ -2336,6 +2390,9 @@ FILE    *fp;
     if ((fp = open_memstream((char **)pdata, psize)) == NULL)
         return ERROR_INT("stream not opened", procName, 1);
     ret = boxaWriteStream(fp, boxa);
+    fputc('\0', fp);
+    fclose(fp);
+    *psize = *psize - 1;
 #else
     L_INFO("work-around: writing to a temp file\n", procName);
   #ifdef _WIN32
@@ -2348,8 +2405,8 @@ FILE    *fp;
     ret = boxaWriteStream(fp, boxa);
     rewind(fp);
     *pdata = l_binaryReadStream(fp, psize);
-#endif  /* HAVE_FMEMOPEN */
     fclose(fp);
+#endif  /* HAVE_FMEMOPEN */
     return ret;
 }
 

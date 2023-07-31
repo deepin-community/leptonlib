@@ -267,9 +267,7 @@ L_BYTEA  *ba;
         if (ba->data) LEPT_FREE(ba->data);
         LEPT_FREE(ba);
     }
-
     *pba = NULL;
-    return;
 }
 
 
@@ -381,8 +379,10 @@ size_t  size, nalloc, reqsize;
     size = l_byteaGetSize(ba);
     reqsize = size + newbytes + 1;
     nalloc = ba->nalloc;
-    if (nalloc < reqsize)
-        l_byteaExtendArrayToSize(ba, 2 * reqsize);
+    if (nalloc < reqsize) {
+        if (l_byteaExtendArrayToSize(ba, 2 * reqsize))
+            return ERROR_INT("extension failed", procName, 1);
+    }
 
     memcpy(ba->data + size, newdata, newbytes);
     ba->size += newbytes;
@@ -414,8 +414,10 @@ size_t  size, len, nalloc, reqsize;
     len = strlen(str);
     reqsize = size + len + 1;
     nalloc = ba->nalloc;
-    if (nalloc < reqsize)
-        l_byteaExtendArrayToSize(ba, 2 * reqsize);
+    if (nalloc < reqsize) {
+        if (l_byteaExtendArrayToSize(ba, 2 * reqsize))
+            return ERROR_INT("extension failed", procName, 1);
+    }
 
     memcpy(ba->data + size, str, len);
     ba->size += len;
@@ -429,6 +431,12 @@ size_t  size, len, nalloc, reqsize;
  * \param[in]    ba
  * \param[in]    size    new size of lba data array
  * \return  0 if OK; 1 on error
+ *
+ * <pre>
+ * Notes:
+ *      (1) If necessary, reallocs the byte array to %size.
+ *      (2) The max buffer size is 1 GB.
+ * </pre>
  */
 static l_int32
 l_byteaExtendArrayToSize(L_BYTEA  *ba,
@@ -438,14 +446,19 @@ l_byteaExtendArrayToSize(L_BYTEA  *ba,
 
     if (!ba)
         return ERROR_INT("ba not defined", procName, 1);
-
-    if (size > ba->nalloc) {
-        if ((ba->data =
-            (l_uint8 *)reallocNew((void **)&ba->data, ba->nalloc, size))
-                 == NULL)
-            return ERROR_INT("new array not returned", procName, 1);
-        ba->nalloc = size;
+    if (ba->nalloc > MaxArraySize)  /* belt & suspenders */
+        return ERROR_INT("ba has too many ptrs", procName, 1);
+    if (size > MaxArraySize)
+        return ERROR_INT("size > 1 GB; too large", procName, 1);
+    if (size <= ba->nalloc) {
+        L_INFO("size too small; no extension\n", procName);
+        return 0;
     }
+
+    if ((ba->data =
+        (l_uint8 *)reallocNew((void **)&ba->data, ba->nalloc, size)) == NULL)
+        return ERROR_INT("new array not returned", procName, 1);
+    ba->nalloc = size;
     return 0;
 }
 
