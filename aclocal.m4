@@ -20,47 +20,8 @@ You have another version of autoconf.  It may work, but is not guaranteed to.
 If you have problems, you may need to regenerate the build system entirely.
 To do so, use the procedure documented by the package, typically 'autoreconf'.])])
 
-# ===========================================================================
-#     https://www.gnu.org/software/autoconf-archive/ax_split_version.html
-# ===========================================================================
-#
-# SYNOPSIS
-#
-#   AX_SPLIT_VERSION
-#
-# DESCRIPTION
-#
-#   Splits a version number in the format MAJOR.MINOR.POINT into its
-#   separate components.
-#
-#   Sets the variables.
-#
-# LICENSE
-#
-#   Copyright (c) 2008 Tom Howard <tomhoward@users.sf.net>
-#
-#   Copying and distribution of this file, with or without modification, are
-#   permitted in any medium without royalty provided the copyright notice
-#   and this notice are preserved. This file is offered as-is, without any
-#   warranty.
-
-#serial 10
-
-AC_DEFUN([AX_SPLIT_VERSION],[
-    AC_REQUIRE([AC_PROG_SED])
-    AX_MAJOR_VERSION=`echo "$VERSION" | $SED 's/\([[^.]][[^.]]*\).*/\1/'`
-    AX_MINOR_VERSION=`echo "$VERSION" | $SED 's/[[^.]][[^.]]*.\([[^.]][[^.]]*\).*/\1/'`
-    AX_POINT_VERSION=`echo "$VERSION" | $SED 's/[[^.]][[^.]]*.[[^.]][[^.]]*.\(.*\)/\1/'`
-    AC_MSG_CHECKING([Major version])
-    AC_MSG_RESULT([$AX_MAJOR_VERSION])
-    AC_MSG_CHECKING([Minor version])
-    AC_MSG_RESULT([$AX_MINOR_VERSION])
-    AC_MSG_CHECKING([Point version])
-    AC_MSG_RESULT([$AX_POINT_VERSION])
-])
-
 dnl pkg.m4 - Macros to locate and utilise pkg-config.   -*- Autoconf -*-
-dnl serial 11 (pkg-config-0.29)
+dnl serial 11 (pkg-config-0.29.1)
 dnl
 dnl Copyright © 2004 Scott James Remnant <scott@netsplit.com>.
 dnl Copyright © 2012-2015 Dan Nicholson <dbn.lists@gmail.com>
@@ -102,7 +63,7 @@ dnl
 dnl See the "Since" comment for each macro you use to see what version
 dnl of the macros you require.
 m4_defun([PKG_PREREQ],
-[m4_define([PKG_MACROS_VERSION], [0.29])
+[m4_define([PKG_MACROS_VERSION], [0.29.1])
 m4_if(m4_version_compare(PKG_MACROS_VERSION, [$1]), -1,
     [m4_fatal([pkg.m4 version $1 or higher is required but ]PKG_MACROS_VERSION[ found])])
 ])dnl PKG_PREREQ
@@ -1448,6 +1409,7 @@ AC_SUBST([am__tar])
 AC_SUBST([am__untar])
 ]) # _AM_PROG_TAR
 
+m4_include([m4/ax_split_version.m4])
 m4_include([m4/libtool.m4])
 m4_include([m4/ltoptions.m4])
 m4_include([m4/ltsugar.m4])

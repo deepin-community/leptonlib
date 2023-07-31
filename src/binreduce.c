@@ -92,6 +92,7 @@ PIX       *pixd;
         return (PIX *)ERROR_PTR("hs must be at least 2", procName, NULL);
     wpls = pixGetWpl(pixs);
     datas = pixGetData(pixs);
+    pixSetPadBits(pixs, 0);
 
     if ((pixd = pixCreate(ws / 2, hs / 2, 1)) == NULL)
         return (PIX *)ERROR_PTR("pixd not made", procName, NULL);
@@ -251,6 +252,7 @@ PIX       *pixd;
         return (PIX *)ERROR_PTR("hs must be at least 2", procName, NULL);
     wpls = pixGetWpl(pixs);
     datas = pixGetData(pixs);
+    pixSetPadBits(pixs, 0);
 
     if ((pixd = pixCreate(ws / 2, hs / 2, 1)) == NULL)
         return (PIX *)ERROR_PTR("pixd not made", procName, NULL);
@@ -393,10 +395,8 @@ l_int32   i;
 
     PROCNAME("makeSubsampleTab2x");
 
-    if ((tab = (l_uint8 *) LEPT_CALLOC(256, sizeof(l_uint8))) == NULL)
-        return (l_uint8 *)ERROR_PTR("tab not made", procName, NULL);
-
-    for (i = 0; i < 256; i++)
+    tab = (l_uint8 *) LEPT_CALLOC(256, sizeof(l_uint8));
+    for (i = 0; i < 256; i++) {
         tab[i] = ((i & 0x01)     ) |    /* 7 */
                  ((i & 0x04) >> 1) |    /* 6 */
                  ((i & 0x10) >> 2) |    /* 5 */
@@ -405,6 +405,6 @@ l_int32   i;
                  ((i & 0x08) << 2) |    /* 2 */
                  ((i & 0x20) << 1) |    /* 1 */
                  ((i & 0x80)     );     /* 0 */
-
+    }
     return tab;
 }

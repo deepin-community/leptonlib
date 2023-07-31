@@ -90,10 +90,10 @@ build_triplet = @build@
 host_triplet = @host@
 subdir = .
 ACLOCAL_M4 = $(top_srcdir)/aclocal.m4
-am__aclocal_m4_deps = $(top_srcdir)/m4/libtool.m4 \
-	$(top_srcdir)/m4/ltoptions.m4 $(top_srcdir)/m4/ltsugar.m4 \
-	$(top_srcdir)/m4/ltversion.m4 $(top_srcdir)/m4/lt~obsolete.m4 \
-	$(top_srcdir)/configure.ac
+am__aclocal_m4_deps = $(top_srcdir)/m4/ax_split_version.m4 \
+	$(top_srcdir)/m4/libtool.m4 $(top_srcdir)/m4/ltoptions.m4 \
+	$(top_srcdir)/m4/ltsugar.m4 $(top_srcdir)/m4/ltversion.m4 \
+	$(top_srcdir)/m4/lt~obsolete.m4 $(top_srcdir)/configure.ac
 am__configure_deps = $(am__aclocal_m4_deps) $(CONFIGURE_DEPENDENCIES) \
 	$(ACLOCAL_M4)
 DIST_COMMON = $(srcdir)/Makefile.am $(top_srcdir)/configure \
@@ -400,6 +400,19 @@ lept_cmakeconfig_DATA = \
 	cmake/templates/LeptonicaConfig-version.cmake
 
 SUBDIRS = src prog
+FUZZERS := adaptmap_fuzzer affine_fuzzer barcode_fuzzer \
+	baseline_fuzzer bilateral_fuzzer binarize_fuzzer blend_fuzzer \
+	boxfunc_fuzzer boxfunc3_fuzzer boxfunc4_fuzzer boxfunc5_fuzzer \
+	ccbord_fuzzer checkerboard_fuzzer classapp_fuzzer \
+	colorfill_fuzzer colorquant_fuzzer compare_fuzzer \
+	dewarp_fuzzer edge_fuzzer enhance_fuzzer fhmtgen_fuzzer \
+	finditalic_fuzzer flipdetect_fuzzer fpix2_fuzzer \
+	graphics_fuzzer graymorph_fuzzer grayquant_fuzzer \
+	jpegiostub_fuzzer kernel_fuzzer mask_fuzzer maze_fuzzer \
+	morph_fuzzer morphapp_fuzzer pageseg_fuzzer paintcmap_fuzzer \
+	pix1_fuzzer pix3_fuzzer pix4_fuzzer pixa_recog_fuzzer \
+	pixconv_fuzzer pix_orient_fuzzer pix_rotate_shear_fuzzer \
+	recog_basic_fuzzer
 all: config_auto.h
 	$(MAKE) $(AM_MAKEFLAGS) all-recursive
 
@@ -937,6 +950,32 @@ uninstall-am: uninstall-lept_cmakeconfigDATA uninstall-pkgconfigDATA
 
 .PRECIOUS: Makefile
 
+
+# The fuzzing tests are run by OSS-Fuzz https://oss-fuzz.com/,
+# but can also be run locally.
+# Note: -fsanitize=fuzzer currently requires the clang++ compiler.
+
+# LIB_FUZZING_ENGINE can be overridden by the caller.
+# This is used by OSS-Fuzz.
+LIB_FUZZING_ENGINE ?= -fsanitize=fuzzer
+
+fuzzers: $(FUZZERS)
+
+$(FUZZERS): all
+
+%_fuzzer: $(top_srcdir)/prog/fuzzing/%_fuzzer.cc
+	$(CXX) $(CXXFLAGS) -g $(LIB_FUZZING_ENGINE) \
+          -I $(top_srcdir)/src \
+          -I $(builddir)/src \
+          $< \
+          $(builddir)/src/.libs/liblept.a \
+          $(GIFLIB_LIBS) \
+          $(JPEG_LIBS) \
+          $(LIBJP2K_LIBS) \
+          $(LIBPNG_LIBS) \
+          $(LIBTIFF_LIBS) \
+          $(LIBWEBP_LIBS) \
+          -o $@
 
 # Tell versions [3.59,3.63) of GNU make to not export all variables.
 # Otherwise a system limit (for SysV at least) may be exceeded.

@@ -8,7 +8,7 @@
 #
 ###############################################################################
 
-cmake_minimum_required(VERSION 2.8.11)
+cmake_minimum_required(VERSION 3.1.3)
 cmake_policy(SET CMP0054 NEW)
 
 # In-source builds are disabled.
@@ -42,7 +42,7 @@ set_property(GLOBAL PROPERTY PREDEFINED_TARGETS_FOLDER "CMake Targets")
 project(leptonica C CXX)
 
 set(VERSION_MAJOR 1)
-set(VERSION_MINOR 79)
+set(VERSION_MINOR 82)
 set(VERSION_PATCH 0)
 set(VERSION_PLAIN ${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH})
 set(MINIMUM_WEBPMUX_VERSION 0.5.0)
@@ -56,6 +56,9 @@ endif()
 if(UNIX)
     option(SYM_LINK "Create symlink leptonica -> lept on UNIX" OFF)
 endif()
+
+set(leptonica_INSTALL_CMAKE_DIR "lib/cmake/leptonica"
+    CACHE STRING "Install destination for CMake package files")
 
 if(NOT SW_BUILD)
     find_package(GIF)
@@ -98,6 +101,17 @@ if(NOT SW_BUILD)
     endif()
     if(NOT JP2K)
         find_path(JP2K_INCLUDE_DIR /openjpeg-2.3/openjpeg.h)
+        find_library(JP2K_LIBRARY NAMES openjp2)
+        if (JP2K_INCLUDE_DIR AND JP2K_LIBRARY)
+             set(JP2K 1)
+             set(JP2K_FOUND TRUE)
+             set(JP2K_LIBRARIES ${JP2K_LIBRARY})
+             set(JP2K_INCLUDE_DIRS ${JP2K_INCLUDE_DIR})
+             set(HAVE_LIBJP2K 1)
+        endif()
+    endif()
+    if(NOT JP2K)
+        find_path(JP2K_INCLUDE_DIR /openjpeg-2.4/openjpeg.h)
         find_library(JP2K_LIBRARY NAMES openjp2)
         if (JP2K_INCLUDE_DIR AND JP2K_LIBRARY)
              set(JP2K 1)
@@ -192,7 +206,11 @@ endif()
 
 set(AUTOCONFIG_SRC ${CMAKE_CURRENT_BINARY_DIR}/config_auto.h.in)
 set(AUTOCONFIG ${CMAKE_CURRENT_BINARY_DIR}/src/config_auto.h)
-set(CMAKE_REQUIRED_INCLUDES ${CMAKE_REQUIRED_INCLUDES} "${CMAKE_PREFIX_PATH}/include" "${CMAKE_INSTALL_PREFIX}/include")
+if (HAVE_LIBJP2K)
+  set(ADDITIONAL_INCLUDE_DIRS "${JP2K_INCLUDE_DIR}")
+endif()
+set(CMAKE_REQUIRED_INCLUDES ${CMAKE_REQUIRED_INCLUDES} "${CMAKE_PREFIX_PATH}/include" "${CMAKE_INSTALL_PREFIX}/include" "${ADDITIONAL_INCLUDE_DIRS}")
+
 
 include(Configure)
 
@@ -261,7 +279,7 @@ install(FILES ${CMAKE_CURRENT_BINARY_DIR}/lept.pc DESTINATION lib/pkgconfig)
 install(FILES
     ${CMAKE_CURRENT_BINARY_DIR}/LeptonicaConfig.cmake
     ${CMAKE_CURRENT_BINARY_DIR}/LeptonicaConfig-version.cmake
-    DESTINATION cmake)
+    DESTINATION ${leptonica_INSTALL_CMAKE_DIR})
 
 ########################################
 # uninstall target

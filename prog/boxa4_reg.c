@@ -62,8 +62,7 @@ L_REGPARAMS  *rp;
 
         /* Input is a fairly clean boxa */
     boxa1 = boxaRead("boxa1.ba");
-    boxa2 = boxaReconcileEvenOddHeight(boxa1, L_ADJUST_TOP, 80,
-                                       L_ADJUST_CHOOSE_MIN, 1.05, 1);
+    boxa2 = boxaSmoothSequenceMedian(boxa1, 10, L_USE_CAPPED_MAX, 50, 0, 0);
     width = 100;
     boxaGetExtent(boxa2, &w, &h, NULL);
     scalefact = (l_float32)width / (l_float32)w;
@@ -78,8 +77,7 @@ L_REGPARAMS  *rp;
 
         /* Input is an unsmoothed and noisy boxa */
     boxa1 = boxaRead("boxa2.ba");
-    boxa2 = boxaReconcileEvenOddHeight(boxa1, L_ADJUST_TOP, 80,
-                                       L_ADJUST_CHOOSE_MIN, 1.05, 1);
+    boxa2 = boxaSmoothSequenceMedian(boxa1, 10, L_USE_CAPPED_MAX, 50, 0, 0);
     width = 100;
     boxaGetExtent(boxa2, &w, &h, NULL);
     scalefact = (l_float32)width / (l_float32)w;
@@ -175,8 +173,7 @@ L_REGPARAMS  *rp;
 
         /* Input is a boxa smoothed with a median window filter */
     boxa1 = boxaRead("boxa3.ba");
-    boxa2 = boxaReconcileEvenOddHeight(boxa1, L_ADJUST_TOP, 80,
-                                       L_ADJUST_CHOOSE_MIN, 1.05, 1);
+    boxa2 = boxaSmoothSequenceMedian(boxa1, 10, L_USE_CAPPED_MIN, 20, 0, 1);
     width = 100;
     boxaGetExtent(boxa2, &w, &h, NULL);
     scalefact = (l_float32)width / (l_float32)w;
@@ -211,7 +208,7 @@ L_REGPARAMS  *rp;
     pix1 = pixaDisplayTiledInRows(pixa2, 32, 1400, 1.0, 0, 10, 0);
     regTestWritePixAndCheck(rp, pix1, IFF_JFIF_JPEG);  /* 12 */
     pixDisplayWithTitle(pix1, 0, 600, NULL, rp->display);
-    fprintf(stderr, "Writing to: /tmp/lept/boxa/show.pdf\n");
+    lept_stderr("Writing to: /tmp/lept/boxa/show.pdf\n");
     l_pdfSetDateAndVersion(FALSE);
     pixaConvertToPdf(pixa2, 75, 0.6, 0, 0, NULL, "/tmp/lept/boxa/show.pdf");
     regTestCheckFile(rp, "/tmp/lept/boxa/show.pdf");  /* 13 */

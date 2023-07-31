@@ -85,14 +85,22 @@
  *             l_int32    pixWriteMemTiff();
  *             l_int32    pixWriteMemTiffCustom();
  *
- *  Note:  To include all necessary functions, use libtiff version 3.7.4
- *         (or later)
- *  Note:  On Windows with 2 bpp or 4 bpp images, the bytes in the
- *         tiff-compressed file depend on the pad bits (but not the
- *         decoded raster image when read).  Because it is sometimes
- *         convenient to use a golden file with a byte-by-byte check
- *         to verify invariance, we set the pad bits to 0 before writing,
- *         in pixWriteToTiffStream().
+ *  Note 1: To include all necessary functions, use libtiff version 3.7.4
+ *          (from 2005) or later.
+ *  Note 2: What compression methods in tiff are supported?
+ *          * We support most methods that are fully implemented in the
+ *            tiff library, such as G3, G4, RLE and LZW.
+ *          * The exception is the old-style jpeg tiff format (OJPEG), which
+ *            is not supported.
+ *          * We support only one format, ZIP, that uses an external library.
+ *          * At present we do not support WEBP in tiff, which uses
+ *            libwebp and was added in tifflib 4.1.0 in 2019.
+ *  Note 3: On Windows with 2 bpp or 4 bpp images, the bytes in the
+ *          tiff-compressed file depend on the pad bits, but not on the
+ *          decoded raster image when read.  Because it is sometimes
+ *          convenient to use a golden file with a byte-by-byte check
+ *          to verify invariance, we set the pad bits to 0 before writing,
+ *          in pixWriteToTiffStream().
  * </pre>
  */
 
@@ -120,8 +128,13 @@
 
 static const l_int32  DefaultResolution = 300;   /* ppi */
 static const l_int32  ManyPagesInTiffFile = 3000;  /* warn if big */
-static const l_uint32  MaxTiffBufferSize = 1 << 24;  /* 16MiB */
 
+    /* Verified that tiflib makes valid g4 files of this size */
+static const l_int32  MaxTiffWidth = 1 << 20;  /* 1M pixels */
+static const l_int32  MaxTiffHeight = 1 << 20;  /* 1M pixels */
+
+    /* Check g4 data size */
+static const size_t  MaxNumTiffBytes = (1 << 28) - 1;  /* 256 MB */
 
     /* All functions with TIFF interfaces are static. */
 static PIX      *pixReadFromTiffStream(TIFF *tif);
@@ -445,11 +458,12 @@ TIFF  *tif;
  *          2 spp (gray+alpha): 8 bps
  *          3 spp (rgb) and 4 spp (rgba): 8 or 16 bps
  *      (2) We do not handle 16 bps for spp == 2.
- *      (3) 2 bpp gray+alpha are rasterized as 32 bit/pixel rgba, with
+ *      (3) We do not support tiled format or webp encoded tiff.
+ *      (4) 2 bpp gray+alpha are rasterized as 32 bit/pixel rgba, with
  *          the gray value replicated in r, g and b.
- *      (4) For colormapped images, we support 8 bits/color in the palette.
+ *      (5) For colormapped images, we support 8 bits/color in the palette.
  *          Tiff colormaps have 16 bits/color, and we reduce them to 8.
- *      (5) Quoting the libtiff documentation at
+ *      (6) Quoting the libtiff documentation at
  *               http://libtiff.maptools.org/libtiff.html
  *          "libtiff provides a high-level interface for reading image data
  *          from a TIFF file. This interface handles the details of data
@@ -475,8 +489,8 @@ l_uint8   *linebuf, *data, *rowptr;
 l_uint16   spp, bps, photometry, tiffcomp, orientation, sample_fmt;
 l_uint16  *redmap, *greenmap, *bluemap;
 l_int32    d, wpl, bpl, comptype, i, j, k, ncolors, rval, gval, bval, aval;
-l_int32    xres, yres;
-l_uint32   w, h, tiffbpl, tiffword, read_oriented;
+l_int32    xres, yres, tiffbpl, packedbpl, half_size, twothirds_size;
+l_uint32   w, h, tiffword, read_oriented;
 l_uint32  *line, *ppixel, *tiffdata, *pixdata;
 PIX       *pix, *pix1;
 PIXCMAP   *cmap;
@@ -509,6 +523,27 @@ PIXCMAP   *cmap;
         return NULL;
     }
 
+        /* Old style jpeg is not supported.  We tried supporting 8 bpp.
+         * TIFFReadScanline() fails on this format, so we used RGBA
+         * reading, which generates a 4 spp image, and pulled out the
+         * red component.  However, there were problems with double-frees
+         * in cleanup.  For RGB, tiffbpl is exactly half the size that
+         * you would expect for the raster data in a scanline, which
+         * is 3 * w.  */
+    TIFFGetFieldDefaulted(tif, TIFFTAG_COMPRESSION, &tiffcomp);
+    if (tiffcomp == COMPRESSION_OJPEG) {
+        L_ERROR("old style jpeg format is not supported\n", procName);
+        return NULL;
+    }
+
+        /* webp in tiff is in 4.1.0 and not yet supported in Adobe registry */
+#if defined(COMPRESSION_WEBP)
+    if (tiffcomp == COMPRESSION_WEBP) {
+        L_ERROR("webp in tiff not generally supported yet\n", procName);
+        return NULL;
+    }
+#endif  /* COMPRESSION_WEBP */
+
         /* Use default fields for bps and spp */
     TIFFGetFieldDefaulted(tif, TIFFTAG_BITSPERSAMPLE, &bps);
     TIFFGetFieldDefaulted(tif, TIFFTAG_SAMPLESPERPIXEL, &spp);
@@ -520,46 +555,71 @@ PIXCMAP   *cmap;
         L_WARNING("for 2 spp, only handle 8 bps\n", procName);
         return NULL;
     }
-    if (spp == 1)
+    if (spp == 1) {
         d = bps;
-    else if (spp == 2)  /* gray plus alpha */
+    } else if (spp == 2) {  /* gray plus alpha */
         d = 32;  /* will convert to RGBA */
-    else if (spp == 3 || spp == 4)
+    } else if (spp == 3 || spp == 4) {
         d = 32;
-    else
-        return (PIX *)ERROR_PTR("spp not in set {1,2,3,4}", procName, NULL);
+    } else {
+        L_ERROR("spp = %d; not in {1,2,3,4}\n", procName, spp);
+        return NULL;
+    }
 
     TIFFGetField(tif, TIFFTAG_IMAGEWIDTH, &w);
     TIFFGetField(tif, TIFFTAG_IMAGELENGTH, &h);
-    tiffbpl = TIFFScanlineSize(tif);
-    if (tiffbpl < (bps * spp * w + 7) / 8)
-        return (PIX *)ERROR_PTR("bad tiff file: tiffbpl is too small",
-                                procName, NULL);
-    if (tiffbpl > MaxTiffBufferSize)
-        return (PIX *)ERROR_PTR("bad tiff file: tiffbpl is too large",
-                                procName, NULL);
+    if (w > MaxTiffWidth) {
+        L_ERROR("width = %d pixels; too large\n", procName, w);
+        return NULL;
+    }
+    if (h > MaxTiffHeight) {
+        L_ERROR("height = %d pixels; too large\n", procName, h);
+        return NULL;
+    }
 
+        /* The relation between the size of a byte buffer required to hold
+           a raster of image pixels (packedbpl) and the size of the tiff
+           buffer (tiffbuf) is either 1:1 or approximately 1.5:1 or 2:1,
+           depending on how the data is stored and subsampled.  For security,
+           we test this relation between tiffbuf and the image parameters
+           w, spp and bps. */
+    tiffbpl = TIFFScanlineSize(tif);
+    packedbpl = (bps * spp * w + 7) / 8;
+    half_size = (L_ABS(2 * tiffbpl - packedbpl) <= 8);
+    twothirds_size = (L_ABS(3 * tiffbpl - 2 * packedbpl) <= 8);
+#if 0
+    if (half_size)
+        L_INFO("half_size: packedbpl = %d is approx. twice tiffbpl = %d\n",
+               procName, packedbpl, tiffbpl);
+    if (twothirds_size)
+        L_INFO("twothirds_size: packedbpl = %d is approx. 1.5 tiffbpl = %d\n",
+               procName, packedbpl, tiffbpl);
+    lept_stderr("tiffbpl = %d, packedbpl = %d, bps = %d, spp = %d, w = %d\n",
+                tiffbpl, packedbpl, bps, spp, w);
+#endif
+    if (tiffbpl != packedbpl && !half_size && !twothirds_size) {
+        L_ERROR("invalid tiffbpl: tiffbpl = %d, packedbpl = %d, "
+                "bps = %d, spp = %d, w = %d\n",
+                procName, tiffbpl, packedbpl, bps, spp, w);
+        return NULL;
+    }
+
+        /* Use a linebuf that will hold all the pixels generated
+           by tiff when reading (decompressing) a scanline. */
     if ((pix = pixCreate(w, h, d)) == NULL)
         return (PIX *)ERROR_PTR("pix not made", procName, NULL);
     pixSetInputFormat(pix, IFF_TIFF);
     data = (l_uint8 *)pixGetData(pix);
     wpl = pixGetWpl(pix);
     bpl = 4 * wpl;
-
-    TIFFGetFieldDefaulted(tif, TIFFTAG_COMPRESSION, &tiffcomp);
-
-        /* Thanks to Jeff Breidenbach, we now support reading 8 bpp
-         * images encoded in the long-deprecated old jpeg format,
-         * COMPRESSION_OJPEG.  TIFFReadScanline() fails on this format,
-         * so we use RGBA reading, which generates a 4 spp image, and
-         * pull out the red component. */
-    if (spp == 1 && tiffcomp != COMPRESSION_OJPEG) {
-        linebuf = (l_uint8 *)LEPT_CALLOC(tiffbpl + 1, sizeof(l_uint8));
+    if (spp == 1) {
+        linebuf = (l_uint8 *)LEPT_CALLOC(4 * wpl, sizeof(l_uint8));
         for (i = 0; i < h; i++) {
             if (TIFFReadScanline(tif, linebuf, i, 0) < 0) {
                 LEPT_FREE(linebuf);
                 pixDestroy(&pix);
-                return (PIX *)ERROR_PTR("line read fail", procName, NULL);
+                L_ERROR("spp = 1, read fail at line %d\n", procName, i);
+                return NULL;
             }
             memcpy(data, linebuf, tiffbpl);
             data += bpl;
@@ -572,13 +632,14 @@ PIXCMAP   *cmap;
     } else if (spp == 2 && bps == 8) {  /* gray plus alpha */
         L_INFO("gray+alpha is not supported; converting to RGBA\n", procName);
         pixSetSpp(pix, 4);
-        linebuf = (l_uint8 *)LEPT_CALLOC(tiffbpl + 1, sizeof(l_uint8));
+        linebuf = (l_uint8 *)LEPT_CALLOC(4 * wpl, sizeof(l_uint8));
         pixdata = pixGetData(pix);
         for (i = 0; i < h; i++) {
             if (TIFFReadScanline(tif, linebuf, i, 0) < 0) {
                 LEPT_FREE(linebuf);
                 pixDestroy(&pix);
-                return (PIX *)ERROR_PTR("line read fail", procName, NULL);
+                L_ERROR("spp = 2, read fail at line %d\n", procName, i);
+                return NULL;
             }
             rowptr = linebuf;
             ppixel = pixdata + i * wpl;
@@ -592,7 +653,7 @@ PIXCMAP   *cmap;
             }
         }
         LEPT_FREE(linebuf);
-    } else {  /* rgb, rgba, or old jpeg */
+    } else {  /* rgb and rgba */
         if ((tiffdata = (l_uint32 *)LEPT_CALLOC((size_t)w * h,
                                                  sizeof(l_uint32))) == NULL) {
             pixDestroy(&pix);
@@ -608,34 +669,22 @@ PIXCMAP   *cmap;
             read_oriented = 1;
         }
 
-        if (spp == 1) {  /* 8 bpp, old jpeg format */
-            pixdata = pixGetData(pix);
-            for (i = 0; i < h; i++) {
-                line = pixdata + i * wpl;
-                for (j = 0; j < w; j++) {
-                    tiffword = tiffdata[i * w + j];
-                    rval = TIFFGetR(tiffword);
-                    SET_DATA_BYTE(line, j, rval);
+        if (spp == 4) pixSetSpp(pix, 4);
+        line = pixGetData(pix);
+        for (i = 0; i < h; i++, line += wpl) {
+            for (j = 0, ppixel = line; j < w; j++) {
+                    /* TIFFGet* are macros */
+                tiffword = tiffdata[i * w + j];
+                rval = TIFFGetR(tiffword);
+                gval = TIFFGetG(tiffword);
+                bval = TIFFGetB(tiffword);
+                if (spp == 3) {
+                    composeRGBPixel(rval, gval, bval, ppixel);
+                } else {  /* spp == 4 */
+                    aval = TIFFGetA(tiffword);
+                    composeRGBAPixel(rval, gval, bval, aval, ppixel);
                 }
-            }
-        } else {  /* rgb or rgba */
-            if (spp == 4) pixSetSpp(pix, 4);
-            line = pixGetData(pix);
-            for (i = 0; i < h; i++, line += wpl) {
-                for (j = 0, ppixel = line; j < w; j++) {
-                        /* TIFFGet* are macros */
-                    tiffword = tiffdata[i * w + j];
-                    rval = TIFFGetR(tiffword);
-                    gval = TIFFGetG(tiffword);
-                    bval = TIFFGetB(tiffword);
-                    if (spp == 3) {
-                        composeRGBPixel(rval, gval, bval, ppixel);
-                    } else {  /* spp == 4 */
-                        aval = TIFFGetA(tiffword);
-                        composeRGBAPixel(rval, gval, bval, aval, ppixel);
-                    }
-                    ppixel++;
-                }
+                ppixel++;
             }
         }
         LEPT_FREE(tiffdata);
@@ -647,7 +696,6 @@ PIXCMAP   *cmap;
     }
 
         /* Find and save the compression type */
-    TIFFGetFieldDefaulted(tif, TIFFTAG_COMPRESSION, &tiffcomp);
     comptype = getTiffCompressedFormat(tiffcomp);
     pixSetInputFormat(pix, comptype);
 
@@ -668,7 +716,10 @@ PIXCMAP   *cmap;
         for (i = 0; i < ncolors; i++)
             pixcmapAddColor(cmap, redmap[i] >> 8, greenmap[i] >> 8,
                             bluemap[i] >> 8);
-        pixSetColormap(pix, cmap);
+        if (pixSetColormap(pix, cmap)) {
+            pixDestroy(&pix);
+            return (PIX *)ERROR_PTR("invalid colormap", procName, NULL);
+        }
 
             /* Remove the colormap for 1 bpp. */
         if (bps == 1) {
@@ -714,7 +765,6 @@ PIXCMAP   *cmap;
     if (text) pixSetText(pix, text);
     return pix;
 }
-
 
 
 /*--------------------------------------------------------------*
@@ -896,13 +946,16 @@ TIFF  *tif;
         return ERROR_INT("stream not defined", procName, 1 );
     if (!pix)
         return ERROR_INT("pix not defined", procName, 1 );
-    if (strcmp(modestr, "w") && strcmp(modestr, "a"))
-        return ERROR_INT("modestr not 'w' or 'a'", procName, 1 );
+    if (strcmp(modestr, "w") && strcmp(modestr, "a")) {
+        L_ERROR("modestr = %s; not 'w' or 'a'\n", procName, modestr);
+        return 1;
+    }
 
     if (pixGetDepth(pix) != 1 && comptype != IFF_TIFF &&
         comptype != IFF_TIFF_LZW && comptype != IFF_TIFF_ZIP &&
         comptype != IFF_TIFF_JPEG) {
-        L_WARNING("invalid compression type for bpp > 1\n", procName);
+        L_WARNING("invalid compression type %d for bpp > 1; using TIFF_ZIP\n",
+                  procName, comptype);
         comptype = IFF_TIFF_ZIP;
     }
 
@@ -1321,12 +1374,12 @@ TIFF    *tif;
     retval = (offset == 0) ? TIFFSetDirectory(tif, 0)
                             : TIFFSetSubDirectory(tif, offset);
     if (retval == 0) {
-        TIFFCleanup(tif);
+        TIFFClose(tif);
         return NULL;
     }
 
     if ((pix = pixReadFromTiffStream(tif)) == NULL) {
-        TIFFCleanup(tif);
+        TIFFClose(tif);
         return NULL;
     }
 
@@ -2154,6 +2207,12 @@ TIFF     *tif;
          * We skip the 8 byte header and take nbytes of data,
          * up to the beginning of the directory (at diroff)  */
     nbytes = diroff - 8;
+    if (nbytes > MaxNumTiffBytes) {
+        LEPT_FREE(inarray);
+        L_ERROR("requesting %zu bytes > %zu\n", procName,
+                nbytes, MaxNumTiffBytes);
+        return 1;
+    }
     *pnbytes = nbytes;
     if ((data = (l_uint8 *)LEPT_CALLOC(nbytes, sizeof(l_uint8))) == NULL) {
         LEPT_FREE(inarray);
